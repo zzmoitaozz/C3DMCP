@@ -1,0 +1,2 @@
+[console_scripts]
+civil3d-mcp = civil3d_mcp.server:main
