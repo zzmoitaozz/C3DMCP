@@ -11,11 +11,26 @@ import keyword
 import logging
 import re
 import secrets
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from civil3d_mcp.paths import user_tools_dir
+
 log = logging.getLogger("civil3d_mcp.tool_builder")
-TOOLS_DIRECTORY = Path(__file__).with_name("custom_tools")
+BUNDLED_TOOLS_DIRECTORY = Path(__file__).with_name("custom_tools")
+TOOLS_DIRECTORY = user_tools_dir()
+_KNOWN_BUILTIN_TOOLS = frozenset(
+    {
+        "list_surfaces", "get_surface_info", "sample_surface_elevation", "list_surface_definition",
+        "create_line", "create_polyline", "list_lines",
+        "get_drawing_info", "list_civil_object_types", "get_selected_objects_info",
+        "get_corridor_info",
+        "create_cogo_point", "list_cogo_points", "delete_cogo_point",
+        "list_alignments", "get_alignment_info", "get_station_offset", "list_profiles", "get_profile_info",
+    }
+)
 MAX_REQUEST_BYTES = 32_768
 MAX_PARAMETERS = 20
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -131,7 +146,7 @@ form.addEventListener("submit", async (event) => {
     }))
   };
   const headers = { "Content-Type": "application/json" };
-  if (mode === "lan") headers.Authorization = `Bearer ${document.querySelector("#token").value}`;
+  if (mode === "lan") headers.Authorization = authHeader();
   try {
     const response = await fetch("/api/tools", {
       method: "POST", headers, body: JSON.stringify(payload)
@@ -157,8 +172,8 @@ class ToolBuilderError(ValueError):
 
 
 def _builtin_tool_names() -> set[str]:
-    names: set[str] = set()
-    for source_path in TOOLS_DIRECTORY.parent.glob("tools_*.py"):
+    names: set[str] = set(_KNOWN_BUILTIN_TOOLS)
+    for source_path in BUNDLED_TOOLS_DIRECTORY.parent.glob("tools_*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
             for decorator in getattr(node, "decorator_list", ()):
