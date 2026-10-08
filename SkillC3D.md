@@ -236,3 +236,10 @@ module and implement its handler using the provided `client` and `run_com`
 arguments before use. The MCP server imports custom modules on startup, so
 restart the MCP server after editing or creating a tool. Only run custom
 modules whose code you trust.
+
+## Single-exe packaging
+
+- Build: `.\build_exe.ps1` (set `BUILD_PYTHON` to a Python 3.11+) -> `dist\civil3d-mcp.exe`.
+- `civil3d-mcp.exe serve` (default): stdio MCP for Claude Desktop plus Web UI at http://localhost:8765 (status + tool builder).
+- `install-claude` merges the exe into claude_desktop_config.json; `install-autocad` copies it to an AutoCAD ApplicationPlugins bundle; `web` runs the UI alone.
+- Custom tools are saved to `%APPDATA%\Civil3DMCP\custom_tools` (override: `CIVIL3D_MCP_TOOLS_DIR`); restart Claude Desktop to load new tools.

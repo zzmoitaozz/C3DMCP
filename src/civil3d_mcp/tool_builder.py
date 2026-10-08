@@ -84,7 +84,14 @@ _PAGE = r"""<!doctype html>
 <body>
 <main data-mode="__MODE__">
   <h1>Civil 3D MCP Tool Builder</h1>
-  <p>Create a Python scaffold. Complete its handler in the project, then restart the MCP server.</p>
+  <section id="status">
+    <h2>MCP server status</h2>
+    <p id="status-text">Checking…</p>
+    <p id="status-dir" class="hint"></p>
+    <p id="status-tools" class="hint"></p>
+    <button class="secondary" id="link-claude" type="button">Link Claude Desktop</button>
+  </section>
+  <p>Create a Python scaffold. Complete its handler, then restart the MCP server (restart Claude Desktop).</p>
   <form id="tool-form">
     <label for="name">Tool name</label>
     <input id="name" name="name" required pattern="[a-z][a-z0-9_]{0,63}"
@@ -110,6 +117,42 @@ const parameterList = document.querySelector("#parameters");
 const result = document.querySelector("#result");
 const mode = document.querySelector("main").dataset.mode;
 document.querySelector("#token-section").hidden = mode !== "lan";
+
+const authHeader = () => "Bearer " + document.querySelector("#token").value;
+const apiHeaders = () => (mode === "lan" ? { Authorization: authHeader() } : {});
+
+async function refreshStatus() {
+  const text = document.querySelector("#status-text");
+  try {
+    const response = await fetch("/api/status", { headers: apiHeaders() });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Unauthorized");
+    text.textContent = "MCP server: running | Civil 3D: " +
+      (data.civil3d_connected ? "connected" : "not connected");
+    text.className = data.civil3d_connected ? "" : "hint";
+    document.querySelector("#status-dir").textContent = "Custom tools folder: " + data.tools_directory;
+    document.querySelector("#status-tools").textContent =
+      "Custom tools: " + (data.custom_tools.join(", ") || "none") +
+      (data.builtin_tool_count ? " | Built-in tools: " + data.builtin_tool_count : "");
+  } catch (error) {
+    text.textContent = "MCP server: unreachable (" + error.message + ")";
+    text.className = "error";
+  }
+}
+document.querySelector("#link-claude").addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/claude/link", { method: "POST", headers: apiHeaders() });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Request failed");
+    result.textContent = "Linked Claude Desktop: " + data.updated.join(", ") + ". Restart Claude Desktop.";
+    result.className = "";
+  } catch (error) {
+    result.textContent = error.message;
+    result.className = "error";
+  }
+});
+refreshStatus();
+setInterval(refreshStatus, 5000);
 
 function addParameter() {
   if (parameterList.children.length >= 20) {
@@ -145,8 +188,7 @@ form.addEventListener("submit", async (event) => {
       required: row.querySelector(".param-required").checked
     }))
   };
-  const headers = { "Content-Type": "application/json" };
-  if (mode === "lan") headers.Authorization = authHeader();
+  const headers = { "Content-Type": "application/json", ...apiHeaders() };
   try {
     const response = await fetch("/api/tools", {
       method: "POST", headers, body: JSON.stringify(payload)
@@ -271,7 +313,8 @@ def generate_tool_module(spec: dict[str, Any]) -> str:
     )
 
 
-def save_tool_module(spec: dict[str, Any], tools_directory: Path = TOOLS_DIRECTORY) -> Path:
+def save_tool_module(spec: dict[str, Any], tools_directory: Path | None = None) -> Path:
+    tools_directory = tools_directory or user_tools_dir()
     checked = validate_tool_spec(spec)
     tools_directory.mkdir(parents=True, exist_ok=True)
     module_path = tools_directory / f"{checked['name']}.py"
@@ -299,17 +342,52 @@ class ToolBuilderHTTPServer(http.server.ThreadingHTTPServer):
         mode: str,
         access_token: str | None,
         tools_directory: Path,
+        status_provider: Callable[[], dict[str, Any]] | None = None,
+        claude_linker: Callable[[], list[Path]] | None = None,
     ) -> None:
         self.mode = mode
         self.access_token = access_token
         self.tools_directory = tools_directory
+        self.status_provider = status_provider
+        self.claude_linker = claude_linker
         super().__init__(server_address, handler_class)
+
+
+def list_tool_files(tools_directory: Path) -> list[str]:
+    if not tools_directory.is_dir():
+        return []
+    return sorted(p.stem for p in tools_directory.glob("*.py") if not p.name.startswith("_"))
 
 
 class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
     server: ToolBuilderHTTPServer
 
+    def _authorized(self) -> bool:
+        access_token = self.server.access_token
+        if access_token is None:
+            return True
+        supplied = self.headers.get("Authorization", "").encode("utf-8")
+        expected = f"Bearer {access_token}".encode("ascii")
+        return hmac.compare_digest(supplied, expected)
+
     def do_GET(self) -> None:
+        if self.path in {"/api/status", "/api/tools"}:
+            if not self._authorized():
+                self._send_json(401, {"error": "A valid LAN access token is required."})
+                return
+            if self.path == "/api/tools":
+                self._send_json(200, {"tools": list_tool_files(self.server.tools_directory)})
+                return
+            status: dict[str, Any] = {"running": True, "civil3d_connected": False}
+            if self.server.status_provider is not None:
+                try:
+                    status.update(self.server.status_provider())
+                except Exception:
+                    log.exception("Status provider failed")
+            status["custom_tools"] = list_tool_files(self.server.tools_directory)
+            status["tools_directory"] = str(self.server.tools_directory)
+            self._send_json(200, status)
+            return
         if self.path not in {"/", "/index.html"}:
             self._send_json(404, {"error": "Not found."})
             return
@@ -328,17 +406,17 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_POST(self) -> None:
-        if self.path != "/api/tools":
+        if self.path not in {"/api/tools", "/api/claude/link"}:
             self._send_json(404, {"error": "Not found."})
             return
 
-        access_token = self.server.access_token
-        if access_token is not None:
-            supplied = self.headers.get("Authorization", "").encode("utf-8")
-            expected = f"Bearer {access_token}".encode("ascii")
-            if not hmac.compare_digest(supplied, expected):
-                self._send_json(401, {"error": "A valid LAN access token is required."})
-                return
+        if not self._authorized():
+            self._send_json(401, {"error": "A valid LAN access token is required."})
+            return
+
+        if self.path == "/api/claude/link":
+            self._link_claude()
+            return
 
         if self.headers.get_content_type() != "application/json":
             self._send_json(415, {"error": "Content-Type must be application/json."})
@@ -378,7 +456,20 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _send_json(self, status: int, payload: dict[str, str]) -> None:
+    def _link_claude(self) -> None:
+        linker = self.server.claude_linker
+        if linker is None:
+            self._send_json(501, {"error": "Claude linking is unavailable."})
+            return
+        try:
+            updated = linker()
+        except Exception as exc:
+            log.exception("Claude link failed")
+            self._send_json(500, {"error": str(exc)})
+            return
+        self._send_json(200, {"updated": [str(x) for x in updated]})
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -395,7 +486,9 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
 def create_server(
     mode: str = "localhost",
     port: int = 8765,
-    tools_directory: Path = TOOLS_DIRECTORY,
+    tools_directory: Path | None = None,
+    status_provider: Callable[[], dict[str, Any]] | None = None,
+    claude_linker: Callable[[], list[Path]] | None = None,
 ) -> tuple[ToolBuilderHTTPServer, str | None]:
     if mode not in {"localhost", "lan"}:
         raise ValueError("mode must be 'localhost' or 'lan'.")
@@ -408,8 +501,20 @@ def create_server(
         ToolBuilderRequestHandler,
         mode=mode,
         access_token=token,
-        tools_directory=tools_directory,
+        tools_directory=tools_directory if tools_directory is not None else user_tools_dir(),
+        status_provider=status_provider,
+        claude_linker=claude_linker,
     )
+    return server, token
+
+
+def start_in_thread(
+    mode: str = "localhost",
+    port: int = 8765,
+    **kwargs: Any,
+) -> tuple[ToolBuilderHTTPServer, str | None]:
+    server, token = create_server(mode, port, **kwargs)
+    threading.Thread(target=server.serve_forever, name="tool-builder", daemon=True).start()
     return server, token
 
 
