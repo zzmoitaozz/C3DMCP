@@ -1,18 +1,10 @@
 {
-  "_comment": "Add the block below to your claude_desktop_config.json under 'mcpServers'.",
-  "_location_windows": "C:\\Users\\Quang\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json",
-
   "mcpServers": {
-    "civil3d-mcp": {
-      "command": "python",
-      "args": ["-m", "civil3d_mcp.server"],
-      "cwd": "E:\\2026\\Civil3D-mcp-python-COM-main\\.venv\\Scripts\\python.exe",
-      "env": {
-        "PYTHONPATH": "E:\\2026\\Civil3D-mcp-python-COM-main\\src",
-        "CIVIL3D_BIN_PATH": "C:\\Program Files\\Autodesk\\AutoCAD 2026\\"
-      }
-    }
-  },
+ "civil3d-mcp": {
+      "type": "uv",
+      "args": ["civil3d-mcp"]
+     
+    },
 
   "_alternative_after_pip_install": {
     "_comment": "If you installed with 'pip install -e .', use this instead:",
@@ -22,4 +14,10 @@
       }
     }
   }
+},
+
+    "_comment": "Add the block below to your claude_desktop_config.json under 'mcpServers'.",
+  "_location_windows": "C:\\Users\\Quang\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json"
+
+  
 }

@@ -2,7 +2,7 @@
 # Install with:  pip install -r requirements.txt
 
 # MCP framework
-fastmcp>=0.4.1
+mcp>=2.0.0
 
 # Windows COM automation
 pywin32>=306

@@ -14,14 +14,23 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Callable, Any
+from contextlib import asynccontextmanager
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
+from . import (
+    tools_alignments,
+    tools_cogo,
+    tools_corridors,
+    tools_drawing,
+    tools_lines,
+    tools_surfaces,
+)
 from .client import Civil3DClient, Civil3DError
-from . import tools_drawing, tools_cogo, tools_lines, tools_surfaces, tools_alignments, tools_corridors
+from .custom_tools import register_custom_tools
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -84,7 +93,10 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(_executor, client.connect)
-        log.info("civil3d-mcp ready  |  19 tools registered")
+        log.info(
+            "civil3d-mcp ready | 19 built-in tools and %d custom tool modules",
+            custom_tool_modules,
+        )
     except Civil3DError as exc:
         log.error("Could not connect to Civil 3D: %s", exc)
         log.error(
@@ -122,6 +134,7 @@ tools_lines.register(mcp, client, run_com)
 tools_surfaces.register(mcp, client, run_com)
 tools_alignments.register(mcp, client, run_com)
 tools_corridors.register(mcp, client, run_com)
+custom_tool_modules = register_custom_tools(mcp, client, run_com)
 
 
 # ---------------------------------------------------------------------------

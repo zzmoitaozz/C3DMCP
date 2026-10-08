@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 from .client import Civil3DClient, Civil3DError
 
@@ -112,4 +112,3 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     # ------------------------------------------------------------------
 
     
-

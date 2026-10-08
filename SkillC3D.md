@@ -207,3 +207,32 @@ Tests use a fully mocked `Civil3DClient` — no Civil 3D installation required t
 → Check Claude Desktop logs: `%APPDATA%\Claude\logs\`  
 → Run `python -m civil3d_mcp.server` manually to see startup errors.
 
+---
+
+## Custom MCP tool builder
+
+Start the builder from the project environment:
+
+```powershell
+python -m civil3d_mcp.tool_builder
+```
+
+By default, the web UI binds only to this computer at
+`http://127.0.0.1:8765`. To allow trusted users on the LAN to reach it, opt in
+explicitly:
+
+```powershell
+python -m civil3d_mcp.tool_builder --mode lan --port 8765
+```
+
+LAN mode prints a generated access token to the builder console. Enter it in
+the UI before creating a tool; share it only with trusted users. The builder
+accepts tool names, descriptions, and up to 20 typed parameters (string,
+integer, number, or boolean). It writes a Python scaffold under
+`src/civil3d_mcp/custom_tools/` and will not overwrite an existing module.
+
+Generated handlers intentionally raise `NotImplementedError`. Edit the new
+module and implement its handler using the provided `client` and `run_com`
+arguments before use. The MCP server imports custom modules on startup, so
+restart the MCP server after editing or creating a tool. Only run custom
+modules whose code you trust.

@@ -52,10 +52,10 @@ except ImportError:
 # Known Autodesk assembly locations (Civil 3D 2023 – 2026 defaults)
 # ---------------------------------------------------------------------------
 # Required DLL — always present in Civil 3D installations
-_CIVIL3D_DLL_NAMES = ["AeccDbMgd.dll"]
+_CIVIL3D_DLL_NAMES = ["AeccDbMgd.dll", "AeccMgd.dll"]
 # Optional DLL — present in Civil 3D 2023/2024 but removed in 2025+
 _CIVIL3D_DLL_NAMES_OPTIONAL = ["AeccLandMgd.dll"]
-_ACAD_DLL_NAME = "acdbmgd.dll"
+_ACAD_DLL_NAMES = ["acdbmgd.dll", "acmgd.dll"]
 _AUTODESK_ROOTS = [
     r"C:\Program Files\Autodesk\AutoCAD 2026\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2026",
@@ -63,6 +63,7 @@ _AUTODESK_ROOTS = [
     r"C:\Program Files\Autodesk\AutoCAD 2025",
     r"C:\Program Files\Autodesk\AutoCAD 2024\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2024",
+    r"C:\Program Files\Autodesk\AutoCAD 2023\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2023",
 ]
 # Override the entire bin folder via env var
@@ -204,7 +205,7 @@ class Civil3DClient:
             )
             return
 
-        for dll in [_ACAD_DLL_NAME] + _CIVIL3D_DLL_NAMES:
+        for dll in _ACAD_DLL_NAMES + _CIVIL3D_DLL_NAMES:
             path = _find_dll(dll)
             if path:
                 try:
