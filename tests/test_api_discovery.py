@@ -65,6 +65,17 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("Rebuild", m["methods"])
         self.assertNotIn("Delete", m["methods"])
 
+    def test_to_plain_slices_before_iterating_sequence(self) -> None:
+        class NonIterableList(list):
+            def __iter__(self):
+                raise AssertionError("the full sequence should not be iterated")
+
+        converted = disc.to_plain(NonIterableList(range(100_000)))
+
+        self.assertEqual(len(converted), 200)
+        self.assertEqual(converted[0], 0)
+        self.assertEqual(converted[-1], 199)
+
 
 class ToolTests(unittest.TestCase):
     def setUp(self) -> None:

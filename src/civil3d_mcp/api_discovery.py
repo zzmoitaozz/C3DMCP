@@ -225,7 +225,7 @@ def to_plain(value: Any, depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (tuple, list)):
-        return [to_plain(v, depth + 1) for v in list(value)[:200]]
+        return [to_plain(v, depth + 1) for v in value[:200]]
     name = getattr(value, "Name", None)
     handle = getattr(value, "Handle", None)
     if isinstance(name, str) or isinstance(handle, str):

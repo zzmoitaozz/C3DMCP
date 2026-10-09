@@ -1044,16 +1044,18 @@ class Civil3DClient:
 
         matching_points: list[int] = []
         try:
+            target_description = point_description.casefold()
             for point in self._iter_com_collection(self._get_cogo_collection()):
-                point_labels: list[str] = []
+                matches_description = False
                 for attr in ("RawDescription", "Description", "Name", "PointName"):
                     try:
                         value = getattr(point, attr, "")
                     except Exception:
                         continue
-                    if value is not None:
-                        point_labels.append(str(value).strip())
-                if any(label.casefold() == point_description.casefold() for label in point_labels):
+                    if value is not None and str(value).strip().casefold() == target_description:
+                        matches_description = True
+                        break
+                if matches_description:
                     matching_points.append(int(point.Number))
         except Civil3DError:
             raise

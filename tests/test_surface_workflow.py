@@ -103,6 +103,40 @@ class SurfaceWorkflowTests(unittest.TestCase):
             "EG_Profile", 1, "Standard", "EG_Surface", 0.0, 100.0, "0"
         )
 
+    def test_stops_reading_fallback_labels_after_raw_description_matches(self) -> None:
+        class MatchingPoint:
+            Number = 4
+
+            def __init__(self) -> None:
+                self.fallback_reads = 0
+
+            @property
+            def RawDescription(self):
+                return " EG "
+
+            @property
+            def Description(self):
+                self.fallback_reads += 1
+                return "EG"
+
+            @property
+            def Name(self):
+                self.fallback_reads += 1
+                return "EG"
+
+            @property
+            def PointName(self):
+                self.fallback_reads += 1
+                return "EG"
+
+        point = MatchingPoint()
+        client, _, _, _, _, _, _ = self.make_client(points=[point], alignments=None)
+
+        result = client.create_surface_from_eg_cogo_points()
+
+        self.assertEqual(result["matched_point_numbers"], [4])
+        self.assertEqual(point.fallback_reads, 0)
+
     def test_no_matching_points_does_not_create_group_or_surface(self) -> None:
         client, _, _, groups, surfaces, _, _ = self.make_client(
             points=[SimpleNamespace(Number=2, RawDescription="TOPO")],
