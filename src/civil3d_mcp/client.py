@@ -1,4 +1,4 @@
-﻿"""
+"""
 client.py  –  Civil3DClient
 ============================
 Wraps COM automation to the running Civil 3D instance.
@@ -23,8 +23,10 @@ never touches COM objects directly.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
+import uuid
 from typing import Any
 
 log = logging.getLogger("civil3d_mcp.client")
@@ -52,10 +54,16 @@ except ImportError:
 # Known Autodesk assembly locations (Civil 3D 2023 – 2026 defaults)
 # ---------------------------------------------------------------------------
 # Required DLL — always present in Civil 3D installations
-_CIVIL3D_DLL_NAMES = ["AeccDbMgd.dll", "AeccMgd.dll"]
+_CIVIL3D_DLL_NAMES = [
+    "AeccDbMgd.dll",
+    "AeccMgd.dll",
+    "AeccPressurePipesMgd.dll",
+    "AeccPipeNetworkMgd.dll",
+]
 # Optional DLL — present in Civil 3D 2023/2024 but removed in 2025+
 _CIVIL3D_DLL_NAMES_OPTIONAL = ["AeccLandMgd.dll"]
-_ACAD_DLL_NAMES = ["acdbmgd.dll", "acmgd.dll"]
+_ACAD_DLL_NAMES = ["acdbmgd.dll", "acmgd.dll",
+    "AcCoreMgd.dll"]
 _AUTODESK_ROOTS = [
     r"C:\Program Files\Autodesk\AutoCAD 2026\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2026",
@@ -112,6 +120,8 @@ class Civil3DClient:
         self._civil: Any = None      # AeccApplication COM object (Civil 3D layer)
         self._doc: Any = None        # AeccDocument (Civil 3D) or AcadDocument fallback
         self._connected = False
+        self._checkpoint_id: str | None = None
+        self._checkpoint_document: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -119,6 +129,7 @@ class Civil3DClient:
 
     # Civil 3D ProgIDs in order of preference.
     _CIVIL3D_PROG_IDS = [
+        "AeccXUiLand.AeccApplication.13.8",  # Civil 3D 2026 (installed type library)
         "AeccXUiLand.AeccApplication.14.4",  # Civil 3D 2026
         "AeccXUiLand.AeccApplication.13.7",  # Civil 3D 2025
         "AeccXUiLand.AeccApplication.14.0",  # Civil 3D 2024
@@ -310,7 +321,7 @@ class Civil3DClient:
         # --- Civil 3D named collections ---
         civil_counts: dict[str, int] = {}
         collection_attrs = {
-            "CogoPoints": "cogo_points",
+            "Points": "cogo_points",
             "AlignmentsSiteless": "alignments",
             "Surfaces": "surfaces",
             "Corridors": "corridors",
@@ -446,17 +457,21 @@ class Civil3DClient:
             docs_to_try.append(civil_doc)
 
         for doc in docs_to_try:
-            col = getattr(doc, "CogoPoints", None)
-            if col is not None:
+            if doc is None:
+                continue
+            for attr in ("Points", "CogoPoints"):
                 try:
-                    _ = col.Count  # verify interface is live
-                    log.debug("_get_cogo_collection: found CogoPoints from doc %r", doc)
+                    col = getattr(doc, attr, None)
+                    if col is None:
+                        continue
+                    _ = col.Count
+                    log.debug("_get_cogo_collection: found %s from doc %r", attr, doc)
                     return col
                 except Exception as exc:
-                    log.debug("_get_cogo_collection: CogoPoints.Count failed on %r: %s", doc, exc)
+                    log.debug("_get_cogo_collection: %s lookup failed on %r: %s", attr, doc, exc)
 
         raise Civil3DError(
-            "CogoPoints collection not found. "
+            "COGO point collection not found (tried Points and CogoPoints). "
             "Ensure Civil 3D (not plain AutoCAD) is running."
         )
 
@@ -471,10 +486,11 @@ class Civil3DClient:
         self._ensure_connected()
         try:
             pts = self._get_cogo_collection()
-            pt_id = pts.Add(easting, northing, elevation, description)
-            pt = pts.Find(pt_id)
+            pt = pts.Add(self._pt3d(easting, northing, elevation))
+            if description:
+                pt.RawDescription = description
             return {
-                "point_number": int(pt.PointNumber),
+                "point_number": int(pt.Number),
                 "northing": float(pt.Northing),
                 "easting": float(pt.Easting),
                 "elevation": float(pt.Elevation),
@@ -491,11 +507,10 @@ class Civil3DClient:
         results: list[dict[str, Any]] = []
         try:
             pts = self._get_cogo_collection()
-            for i, pt in enumerate(pts):
-                if i >= max_count:
-                    break
+            for i in range(min(int(pts.Count), max_count)):
+                pt = pts.Item(i)
                 results.append({
-                    "point_number": int(pt.PointNumber),
+                    "point_number": int(pt.Number),
                     "northing": float(pt.Northing),
                     "easting": float(pt.Easting),
                     "elevation": float(pt.Elevation),
@@ -512,10 +527,10 @@ class Civil3DClient:
         self._ensure_connected()
         try:
             pts = self._get_cogo_collection()
-            pt = pts.FindByPointNumber(point_number)
+            pt = pts.Find(point_number)
             if pt is None:
                 raise Civil3DError(f"Point {point_number} not found.")
-            pts.Delete(pt.PointNumber)
+            pt.Delete()
             return True
         except Civil3DError:
             raise
@@ -525,6 +540,98 @@ class Civil3DClient:
     # ------------------------------------------------------------------
     # Lines & Polylines
     # ------------------------------------------------------------------
+
+    def create_solid_box(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        length: float,
+        width: float,
+        height: float,
+        layer: str = "0",
+    ) -> dict[str, Any]:
+        """Create an axis-aligned 3-D box solid in model space."""
+        self._ensure_connected()
+        values = (x, y, z, length, width, height)
+        if not all(math.isfinite(float(value)) for value in values):
+            raise Civil3DError("Coordinates and dimensions must be finite numbers.")
+        if any(float(value) <= 0 for value in (length, width, height)):
+            raise Civil3DError("Solid dimensions must be greater than zero.")
+        if not isinstance(layer, str) or not layer.strip():
+            raise Civil3DError("Layer name must be a non-empty string.")
+
+        try:
+            acad_doc = self._acad.ActiveDocument
+            solid = acad_doc.ModelSpace.AddBox(
+                self._pt3d(x, y, z), float(length), float(width), float(height)
+            )
+            solid.Layer = layer
+            solid.Update()
+            try:
+                acad_doc.Regen(1)
+            except Exception:
+                pass
+            return {
+                "object_id": str(solid.ObjectID),
+                "handle": str(solid.Handle),
+                "layer": str(solid.Layer),
+                "origin": {"x": float(x), "y": float(y), "z": float(z)},
+                "length": float(length),
+                "width": float(width),
+                "height": float(height),
+                "volume": float(length) * float(width) * float(height),
+            }
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            raise Civil3DError(f"create_solid_box failed: {exc}") from exc
+
+    def create_checkpoint(self) -> dict[str, Any]:
+        """Mark the current drawing's undo history for a later restore."""
+        self._ensure_connected()
+        try:
+            acad_doc = self._acad.ActiveDocument
+            document_name = str(acad_doc.FullName or acad_doc.Name)
+            acad_doc.SendCommand("_.UNDO _MARK\n")
+            checkpoint_id = uuid.uuid4().hex
+            self._checkpoint_id = checkpoint_id
+            self._checkpoint_document = document_name
+            return {
+                "checkpoint_id": checkpoint_id,
+                "drawing": document_name,
+                "message": "Checkpoint created; only the latest checkpoint can be restored.",
+            }
+        except Exception as exc:
+            raise Civil3DError(f"create_checkpoint failed: {exc}") from exc
+
+    def restore_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
+        """Undo drawing changes made since the latest checkpoint mark."""
+        self._ensure_connected()
+        if checkpoint_id != self._checkpoint_id:
+            raise Civil3DError(
+                "Checkpoint not found or no longer restorable. "
+                "Only the latest checkpoint in this server session can be restored."
+            )
+        try:
+            acad_doc = self._acad.ActiveDocument
+            document_name = str(acad_doc.FullName or acad_doc.Name)
+            if document_name != self._checkpoint_document:
+                raise Civil3DError(
+                    "The active drawing differs from the drawing where this checkpoint was created."
+                )
+            acad_doc.SendCommand("_.UNDO _BACK\n")
+            self._checkpoint_id = None
+            self._checkpoint_document = None
+            return {
+                "restored": True,
+                "drawing": document_name,
+                "checkpoint_id": checkpoint_id,
+            }
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            raise Civil3DError(f"restore_checkpoint failed: {exc}") from exc
 
     def create_line(
         self,
@@ -894,6 +1001,194 @@ class Civil3DClient:
         return result
 
     
+
+    def create_surface_from_eg_cogo_points(
+        self,
+        surface_name: str = "EG_Surface",
+        profile_name: str = "EG_Profile",
+        point_description: str = "EG",
+    ) -> dict[str, Any]:
+        """Create a TIN from matching COGO points and add surface profiles."""
+        self._ensure_connected()
+        surface_name = surface_name.strip()
+        profile_name = profile_name.strip()
+        point_description = point_description.strip()
+        if not surface_name or not profile_name or not point_description:
+            raise Civil3DError(
+                "surface_name, profile_name, and point_description must not be empty."
+            )
+
+        doc = self._civil_doc()
+        try:
+            surfaces = doc.Surfaces
+            point_groups = doc.PointGroups
+            surface_style = doc.SurfaceStyles.Item(0).Name
+            profile_style = doc.ProfileStyles.Item(0).Name
+            layer = doc.Layers.Item(0).Name
+        except Exception as exc:
+            raise Civil3DError(
+                f"Required Civil 3D surface, point-group, style, or layer collection "
+                f"is unavailable: {exc}"
+            ) from exc
+
+        try:
+            for existing in self._iter_com_collection(surfaces):
+                if str(getattr(existing, "Name", "")).casefold() == surface_name.casefold():
+                    raise Civil3DError(
+                        f"Surface '{surface_name}' already exists; choose another name."
+                    )
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            raise Civil3DError(f"Could not check existing surfaces: {exc}") from exc
+
+        matching_points: list[int] = []
+        try:
+            for point in self._iter_com_collection(self._get_cogo_collection()):
+                point_labels: list[str] = []
+                for attr in ("RawDescription", "Description", "Name", "PointName"):
+                    try:
+                        value = getattr(point, attr, "")
+                    except Exception:
+                        continue
+                    if value is not None:
+                        point_labels.append(str(value).strip())
+                if any(label.casefold() == point_description.casefold() for label in point_labels):
+                    matching_points.append(int(point.Number))
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            raise Civil3DError(f"Could not inspect COGO points: {exc}") from exc
+
+        if not matching_points:
+            raise Civil3DError(
+                f"No COGO points have description or name '{point_description}'. "
+                "No surface or profiles were created."
+            )
+
+        alignments = self._get_alignments()
+        profile_targets: list[tuple[Any, Any]] = []
+        for alignment in alignments:
+            alignment_name = str(alignment.Name)
+            profiles = getattr(alignment, "Profiles", None)
+            if profiles is None:
+                raise Civil3DError(
+                    f"Alignment '{alignment_name}' has no Profiles collection; "
+                    "no surface or profiles were created."
+                )
+            profile_targets.append((alignment, profiles))
+
+        group_name = f"{surface_name}_EG_{uuid.uuid4().hex[:8]}"
+        tin_data = None
+        attempted_versions = [
+            prog_id.rsplit(".", 1)[-1] for prog_id in self._CIVIL3D_PROG_IDS
+        ]
+        for version in attempted_versions:
+            try:
+                tin_data = self._acad.GetInterfaceObject(
+                    f"AeccXLand.AeccTinCreationData.{version}"
+                )
+                if tin_data is not None:
+                    break
+            except Exception:
+                continue
+        if tin_data is None:
+            raise Civil3DError(
+                "Could not create AeccTinCreationData. Tried Civil 3D versions: "
+                + ", ".join(attempted_versions)
+            )
+
+        try:
+            tin_data.Name = surface_name
+            tin_data.Description = (
+                f"TIN surface created from COGO points matching '{point_description}'."
+            )
+            tin_data.Layer = layer
+            tin_data.BaseLayer = layer
+            tin_data.Style = surface_style
+        except Exception as exc:
+            raise Civil3DError(f"Could not configure TIN surface data: {exc}") from exc
+
+        point_group = None
+        surface = None
+        try:
+            point_group = point_groups.Add(group_name)
+            point_group.QueryBuilder.IncludeNumbers = ",".join(
+                str(number) for number in matching_points
+            )
+            surface = surfaces.AddTinSurface(tin_data)
+            surface.PointGroups.Add(point_group)
+            surface.Rebuild()
+        except Exception as exc:
+            cleanup_errors: list[str] = []
+            for item, label in ((surface, "surface"), (point_group, "point group")):
+                if item is None:
+                    continue
+                try:
+                    item.Delete()
+                except Exception as cleanup_exc:
+                    cleanup_errors.append(f"{label}: {cleanup_exc}")
+            cleanup_note = (
+                f" Cleanup also failed ({'; '.join(cleanup_errors)})."
+                if cleanup_errors else ""
+            )
+            raise Civil3DError(
+                f"Could not create or populate TIN surface '{surface_name}': {exc}."
+                f"{cleanup_note}"
+            ) from exc
+
+        profiles_created: list[dict[str, Any]] = []
+        profile_errors: list[dict[str, str]] = []
+        for alignment, profiles in profile_targets:
+            alignment_name = str(alignment.Name)
+            try:
+                existing_names = {
+                    str(getattr(item, "Name", "")).casefold()
+                    for item in self._iter_com_collection(profiles)
+                }
+                if profile_name.casefold() in existing_names:
+                    profiles_created.append({
+                        "alignment_name": alignment_name,
+                        "profile_name": profile_name,
+                        "status": "already_exists",
+                    })
+                    continue
+                profiles.AddFromSurface(
+                    profile_name,
+                    1,
+                    profile_style,
+                    surface_name,
+                    float(alignment.StartingStation),
+                    float(alignment.EndingStation),
+                    "0",
+                )
+                profiles_created.append({
+                    "alignment_name": alignment_name,
+                    "profile_name": profile_name,
+                    "status": "created",
+                })
+            except Exception as exc:
+                log.warning(
+                    "Could not create surface profile '%s' for alignment '%s': %s",
+                    profile_name, alignment_name, exc,
+                )
+                profile_errors.append({
+                    "alignment_name": alignment_name,
+                    "error": str(exc),
+                })
+
+        return {
+            "status": "partial" if profile_errors else "completed",
+            "surface_name": surface_name,
+            "point_group": group_name,
+            "point_description": point_description,
+            "matched_point_count": len(matching_points),
+            "matched_point_numbers": matching_points,
+            "profiles": profiles_created,
+            "profile_errors": profile_errors,
+            "profile_views_created": False,
+        }
+
     # ------------------------------------------------------------------
     # Alignments
     # ------------------------------------------------------------------

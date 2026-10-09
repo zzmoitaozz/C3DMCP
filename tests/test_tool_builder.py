@@ -65,6 +65,11 @@ class ToolBuilderTests(unittest.TestCase):
         with self.assertRaises(ToolBuilderError):
             validate_tool_spec(duplicate_name)
 
+        generated_namespace = tool_spec()
+        generated_namespace["name"] = "c3d_alignment_api"
+        with self.assertRaises(ToolBuilderError):
+            validate_tool_spec(generated_namespace)
+
         invalid_type = tool_spec()
         invalid_type["parameters"] = [{"name": "value", "type": [], "required": True}]
         with self.assertRaises(ToolBuilderError):
@@ -110,6 +115,11 @@ class ToolBuilderTests(unittest.TestCase):
             try:
                 page = urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read()
                 self.assertIn(b'data-mode="localhost"', page)
+                self.assertIn(b'<html lang="vi">', page)
+                self.assertIn("Bạn muốn làm gì?".encode("utf-8"), page)
+                self.assertIn("Sao chép câu gợi ý".encode("utf-8"), page)
+                self.assertIn("create_cogo_point".encode("ascii"), page)
+                self.assertIn("Nâng cao: Tạo công cụ MCP tùy chỉnh".encode("utf-8"), page)
                 request = Request(
                     f"http://127.0.0.1:{server.server_address[1]}/api/tools",
                     data=json.dumps(tool_spec()).encode("utf-8"),

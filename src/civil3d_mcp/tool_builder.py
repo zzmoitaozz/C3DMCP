@@ -24,7 +24,9 @@ TOOLS_DIRECTORY = user_tools_dir()
 _KNOWN_BUILTIN_TOOLS = frozenset(
     {
         "list_surfaces", "get_surface_info", "sample_surface_elevation", "list_surface_definition",
+        "tool_surface_mng",
         "create_line", "create_polyline", "list_lines",
+        "create_solid_box", "create_checkpoint", "restore_checkpoint",
         "get_drawing_info", "list_civil_object_types", "get_selected_objects_info",
         "get_corridor_info",
         "create_cogo_point", "list_cogo_points", "delete_cogo_point",
@@ -49,67 +51,97 @@ _OPTIONAL_DEFAULTS = {
 _RESERVED_PARAMETER_NAMES = {"mcp", "client", "run_com"}
 
 _PAGE = r"""<!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Civil 3D MCP Tool Builder</title>
+  <title>Công cụ Civil 3D</title>
   <style>
-    :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; }
+    :root { color-scheme: light; font: 16px/1.55 system-ui, sans-serif; }
     body { margin: 0; background: #f3f5f8; color: #172033; }
-    main { max-width: 820px; margin: 40px auto; padding: 28px; background: white;
-           border: 1px solid #d9e0ea; border-radius: 12px; }
-    h1 { margin-top: 0; font-size: 1.6rem; }
+    main { max-width: 960px; margin: 28px auto; padding: 28px; }
+    section, details { margin: 18px 0; padding: 20px; background: white;
+      border: 1px solid #d9e0ea; border-radius: 12px; }
+    h1 { margin: 0; font-size: 1.8rem; }
+    h2 { margin: 0 0 10px; font-size: 1.25rem; }
     p, .hint { color: #526176; }
+    .intro { margin-top: 6px; font-size: 1.05rem; }
     label { display: block; margin: 14px 0 5px; font-weight: 600; }
     input, textarea, select, button { font: inherit; }
     input[type=text], textarea, select { box-sizing: border-box; width: 100%;
       padding: 9px 10px; border: 1px solid #b8c4d4; border-radius: 6px; }
     textarea { min-height: 84px; resize: vertical; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #search { max-width: 360px; }
+    .tool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px; margin-top: 16px; }
+    .tool-card { padding: 16px; border: 1px solid #d9e0ea; border-radius: 8px; }
+    .tool-card h3 { margin: 0; font-size: 1.05rem; }
+    .tool-card code { color: #526176; overflow-wrap: anywhere; }
+    .tool-card p { margin: 8px 0; }
     .parameter { display: grid; grid-template-columns: 1.2fr 1fr auto auto;
       align-items: end; gap: 12px; margin: 12px 0; }
     .required { padding-bottom: 10px; white-space: nowrap; }
     button { padding: 9px 14px; border: 0; border-radius: 6px; cursor: pointer;
       background: #155eef; color: white; font-weight: 600; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible,
+    summary:focus-visible { outline: 3px solid #7da7ff; outline-offset: 2px; }
     button.secondary { background: #e8edf5; color: #172033; }
     button.remove { background: #fff0f0; color: #a11919; }
+    summary { cursor: pointer; font-weight: 700; }
     #result { min-height: 1.5em; margin-top: 16px; white-space: pre-wrap; }
-    #result.error { color: #a11919; }
+    #result.error, .error { color: #a11919; }
     @media (max-width: 650px) {
-      main { margin: 12px; padding: 18px; }
+      main { margin: 8px; padding: 10px; }
+      section, details { padding: 16px; }
       .parameter { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
 <body>
 <main data-mode="__MODE__">
-  <h1>Civil 3D MCP Tool Builder</h1>
+  <h1>Công cụ Civil 3D</h1>
+  <p class="intro">Chọn một việc bạn muốn làm, rồi sao chép câu gợi ý để gửi cho trợ lý MCP.</p>
   <section id="status">
-    <h2>MCP server status</h2>
-    <p id="status-text">Checking…</p>
+    <h2>Trạng thái kết nối</h2>
+    <p id="status-text" aria-live="polite">Đang kiểm tra kết nối…</p>
     <p id="status-dir" class="hint"></p>
     <p id="status-tools" class="hint"></p>
-    <button class="secondary" id="link-claude" type="button">Link Claude Desktop</button>
+    <button class="secondary" id="link-claude" type="button">Kết nối Claude Desktop</button>
   </section>
-  <p>Create a Python scaffold. Complete its handler, then restart the MCP server (restart Claude Desktop).</p>
-  <form id="tool-form">
-    <label for="name">Tool name</label>
-    <input id="name" name="name" required pattern="[a-z][a-z0-9_]{0,63}"
-      placeholder="get_parcel_area" autocomplete="off">
-    <label for="description">Description</label>
-    <textarea id="description" name="description" maxlength="1000" required
-      placeholder="Describe what the tool does"></textarea>
-    <div id="token-section" hidden>
-      <label for="token">LAN access token</label>
-      <input id="token" type="text" autocomplete="off" spellcheck="false">
+  <section aria-labelledby="tools-heading">
+    <h2 id="tools-heading">Bạn muốn làm gì?</h2>
+    <p class="hint">Các công cụ dưới đây đã có sẵn. Câu gợi ý sẽ được sao chép để bạn dán vào cuộc trò chuyện với trợ lý MCP.</p>
+    <div class="toolbar">
+      <label for="search">Tìm theo công việc hoặc tên công cụ</label>
+      <input id="search" type="search" placeholder="Ví dụ: tạo điểm, bề mặt, cao độ">
     </div>
-    <h2>Parameters</h2>
-    <p class="hint">Parameter names use lowercase letters, digits, and underscores. Required parameters are listed first in the generated function.</p>
-    <div id="parameters"></div>
-    <button class="secondary" id="add-parameter" type="button">Add parameter</button>
-    <p><button type="submit">Generate tool scaffold</button></p>
-  </form>
-  <div id="result" role="status" aria-live="polite"></div>
+    <div id="tool-list" class="tool-grid" aria-live="polite"></div>
+    <p id="empty-tools" class="hint" hidden>Không tìm thấy công cụ phù hợp. Hãy thử từ khóa khác.</p>
+  </section>
+  <details>
+    <summary>Nâng cao: Tạo công cụ MCP tùy chỉnh</summary>
+    <p class="hint">Phần này dành cho người phát triển. Trang tạo khung mã Python; cần bổ sung phần xử lý và khởi động lại MCP trước khi dùng. Nếu bạn chỉ muốn thao tác bản vẽ, hãy chọn công cụ có sẵn ở phía trên.</p>
+    <form id="tool-form">
+      <label for="name">Tên kỹ thuật của công cụ</label>
+      <input id="name" name="name" required pattern="[a-z][a-z0-9_]{0,63}"
+        placeholder="get_parcel_area" autocomplete="off">
+      <p class="hint">Chỉ dùng chữ thường, chữ số và dấu gạch dưới; ví dụ: tinh_dien_tich_thua.</p>
+      <label for="description">Công cụ sẽ làm gì?</label>
+      <textarea id="description" name="description" maxlength="1000" required
+        placeholder="Mô tả ngắn gọn kết quả công cụ cần trả về"></textarea>
+      <div id="token-section" hidden>
+        <label for="token">Mã truy cập khi mở trang trong mạng nội bộ</label>
+        <input id="token" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <h2>Thông tin đầu vào (nếu cần)</h2>
+      <p class="hint">Mỗi thông tin đầu vào là một giá trị mà người dùng cần cung cấp, ví dụ mã thửa hoặc cao độ.</p>
+      <div id="parameters"></div>
+      <button class="secondary" id="add-parameter" type="button">+ Thêm thông tin đầu vào</button>
+      <p><button type="submit">Tạo khung mã công cụ</button></p>
+    </form>
+    <div id="result" role="status" aria-live="polite"></div>
+  </details>
 </main>
 <script>
 const form = document.querySelector("#tool-form");
@@ -117,6 +149,70 @@ const parameterList = document.querySelector("#parameters");
 const result = document.querySelector("#result");
 const mode = document.querySelector("main").dataset.mode;
 document.querySelector("#token-section").hidden = mode !== "lan";
+
+const toolGuides = [
+  ["Điểm COGO", "create_cogo_point", "Tạo một điểm COGO từ tọa độ.", "Tạo điểm COGO tại tọa độ X (hướng Đông) là …, Y (hướng Bắc) là …, cao độ …, mô tả …."],
+  ["Danh sách điểm COGO", "list_cogo_points", "Xem tọa độ và mô tả các điểm COGO trong bản vẽ.", "Liệt kê các điểm COGO trong bản vẽ."],
+  ["Xóa điểm COGO", "delete_cogo_point", "Xóa một điểm COGO theo số hiệu điểm.", "Xóa điểm COGO số … trong bản vẽ."],
+  ["Đường thẳng 3D", "create_line", "Vẽ một đoạn thẳng giữa hai tọa độ 3D.", "Tạo đường thẳng 3D từ (X …, Y …, Z …) đến (X …, Y …, Z …) trên lớp …."],
+  ["Đường gấp khúc 3D", "create_polyline", "Vẽ đường gấp khúc qua các tọa độ đã cho.", "Tạo đường gấp khúc 3D đi qua các điểm … trên lớp …."],
+  ["Danh sách đường", "list_lines", "Liệt kê chiều dài các đường và đường gấp khúc.", "Liệt kê các đường trong bản vẽ, chỉ lấy lớp …."],
+  ["Khối hộp 3D", "create_solid_box", "Tạo khối hộp solid theo góc đáy và kích thước.", "Tạo khối hộp tại (X …, Y …, Z …), dài …, rộng …, cao … trên lớp …."],
+  ["Tạo checkpoint", "create_checkpoint", "Đánh dấu trạng thái undo hiện tại của bản vẽ.", "Tạo checkpoint trước khi chỉnh sửa bản vẽ."],
+  ["Khôi phục checkpoint", "restore_checkpoint", "Undo bản vẽ về checkpoint mới nhất của phiên MCP.", "Khôi phục bản vẽ về checkpoint có mã …."],
+  ["Danh sách bề mặt", "list_surfaces", "Xem các bề mặt và khoảng cao độ của chúng.", "Liệt kê các bề mặt trong bản vẽ."],
+  ["Tạo bề mặt EG và trắc dọc", "tool_surface_mng", "Tạo bề mặt TIN từ điểm COGO có mô tả/tên EG, rồi tạo trắc dọc trên các tuyến.", "Tạo bề mặt EG từ các điểm COGO có mô tả hoặc tên là EG, sau đó tạo trắc dọc EG cho tất cả tuyến."],
+  ["Thông tin bề mặt", "get_surface_info", "Xem thống kê chi tiết của một bề mặt.", "Cho tôi biết thông tin chi tiết của bề mặt tên là …."],
+  ["Cao độ tại vị trí", "sample_surface_elevation", "Tra cao độ bề mặt tại một tọa độ.", "Đọc cao độ bề mặt … tại tọa độ X (hướng Đông) …, Y (hướng Bắc) …."],
+  ["Thành phần bề mặt", "list_surface_definition", "Xem dữ liệu dùng để tạo bề mặt như đường đồng mức và đường gãy.", "Liệt kê dữ liệu cấu thành bề mặt tên là …."],
+  ["Thông tin bản vẽ", "get_drawing_info", "Xem tên bản vẽ, hệ tọa độ, đơn vị và trạng thái lưu.", "Cho tôi biết thông tin bản vẽ Civil 3D đang mở."],
+  ["Các loại đối tượng", "list_civil_object_types", "Đếm các đối tượng AutoCAD và Civil 3D trong bản vẽ.", "Thống kê các loại đối tượng đang có trong bản vẽ."],
+  ["Đối tượng đang chọn", "get_selected_objects_info", "Xem thông tin các đối tượng đang được chọn.", "Cho tôi biết thông tin các đối tượng tôi đang chọn trong bản vẽ."],
+  ["Thông tin tuyến", "get_alignment_info", "Xem chiều dài, lý trình và các đoạn hình học của tuyến.", "Cho tôi biết chi tiết tuyến có tên …."],
+  ["Danh sách tuyến", "list_alignments", "Liệt kê các tuyến trong bản vẽ.", "Liệt kê các tuyến có trong bản vẽ."],
+  ["Lý trình và độ lệch", "get_station_offset", "Tìm lý trình và khoảng lệch từ tọa độ đến tuyến.", "Tìm lý trình và độ lệch của tọa độ X (hướng Đông) …, Y (hướng Bắc) … so với tuyến …."],
+  ["Danh sách trắc dọc", "list_profiles", "Liệt kê các trắc dọc của một tuyến.", "Liệt kê trắc dọc thuộc tuyến …."],
+  ["Thông tin trắc dọc", "get_profile_info", "Xem cao độ, độ dốc và đường cong của trắc dọc.", "Cho tôi biết chi tiết trắc dọc … thuộc tuyến …."],
+  ["Thông tin hành lang tuyến", "get_corridor_info", "Xem tuyến cơ sở, vùng và mặt cắt của hành lang tuyến.", "Cho tôi biết chi tiết hành lang tuyến tên là …."]
+];
+
+function renderTools(filter = "") {
+  const list = document.querySelector("#tool-list");
+  const query = filter.trim().toLocaleLowerCase("vi");
+  const matches = toolGuides.filter((tool) =>
+    tool.join(" ").toLocaleLowerCase("vi").includes(query));
+  list.replaceChildren();
+  for (const [title, name, description, prompt] of matches) {
+    const card = document.createElement("article");
+    card.className = "tool-card";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const identifier = document.createElement("code");
+    identifier.textContent = name;
+    const detail = document.createElement("p");
+    detail.textContent = description;
+    const example = document.createElement("p");
+    example.textContent = "Gợi ý: “" + prompt + "”";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "secondary";
+    copy.textContent = "Sao chép câu gợi ý";
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(prompt);
+        copy.textContent = "Đã sao chép";
+      } catch {
+        copy.textContent = "Không sao chép được — hãy chọn và sao chép câu gợi ý";
+      }
+    });
+    card.append(heading, identifier, detail, example, copy);
+    list.append(card);
+  }
+  document.querySelector("#empty-tools").hidden = matches.length > 0;
+}
+document.querySelector("#search").addEventListener("input", (event) =>
+  renderTools(event.target.value));
+renderTools();
 
 const authHeader = () => "Bearer " + document.querySelector("#token").value;
 const apiHeaders = () => (mode === "lan" ? { Authorization: authHeader() } : {});
@@ -126,16 +222,19 @@ async function refreshStatus() {
   try {
     const response = await fetch("/api/status", { headers: apiHeaders() });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Unauthorized");
-    text.textContent = "MCP server: running | Civil 3D: " +
-      (data.civil3d_connected ? "connected" : "not connected");
+    if (!response.ok) throw new Error(data.error || "Không thể kiểm tra trạng thái.");
+    text.textContent = "MCP: đang chạy | Civil 3D: " +
+      (data.civil3d_connected ? "đã kết nối" : "chưa kết nối");
     text.className = data.civil3d_connected ? "" : "hint";
-    document.querySelector("#status-dir").textContent = "Custom tools folder: " + data.tools_directory;
+    document.querySelector("#status-dir").textContent = "Thư mục công cụ tùy chỉnh: " + data.tools_directory;
     document.querySelector("#status-tools").textContent =
-      "Custom tools: " + (data.custom_tools.join(", ") || "none") +
-      (data.builtin_tool_count ? " | Built-in tools: " + data.builtin_tool_count : "");
+      "Tool đã đăng ký: " + (data.static_tool_count ?? "?") +
+      " tĩnh | " + (data.generated_api_tool_count ?? "?") + " API | " +
+      (data.custom_tool_module_count ?? "?") + " module tùy chỉnh" +
+      " | Tệp tùy chỉnh: " + (data.custom_tools.join(", ") || "chưa có");
   } catch (error) {
-    text.textContent = "MCP server: unreachable (" + error.message + ")";
+    text.textContent = "Không kiểm tra được kết nối MCP: " +
+      (error.message || "lỗi kết nối chưa xác định.");
     text.className = "error";
   }
 }
@@ -143,11 +242,11 @@ document.querySelector("#link-claude").addEventListener("click", async () => {
   try {
     const response = await fetch("/api/claude/link", { method: "POST", headers: apiHeaders() });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Request failed");
-    result.textContent = "Linked Claude Desktop: " + data.updated.join(", ") + ". Restart Claude Desktop.";
+    if (!response.ok) throw new Error(data.error || "Không thể cập nhật cấu hình Claude Desktop.");
+    result.textContent = "Đã cập nhật cấu hình Claude Desktop. Hãy khởi động lại Claude Desktop để áp dụng.";
     result.className = "";
   } catch (error) {
-    result.textContent = error.message;
+    result.textContent = error.message || "Đã xảy ra lỗi khi kết nối Claude Desktop.";
     result.className = "error";
   }
 });
@@ -156,20 +255,20 @@ setInterval(refreshStatus, 5000);
 
 function addParameter() {
   if (parameterList.children.length >= 20) {
-    result.textContent = "A tool can have at most 20 parameters.";
+    result.textContent = "Mỗi công cụ có thể có tối đa 20 thông tin đầu vào.";
     result.className = "error";
     return;
   }
   const row = document.createElement("div");
   row.className = "parameter";
-  row.innerHTML = `<div><label>Parameter name</label><input class="param-name" required
-    pattern="[a-z][a-z0-9_]{0,63}" placeholder="parcel_id"></div>
-    <div><label>Type</label><select class="param-type">
-      <option value="string">String</option><option value="integer">Integer</option>
-      <option value="number">Number</option><option value="boolean">Boolean</option>
+  row.innerHTML = `<div><label>Tên kỹ thuật</label><input class="param-name" required
+    pattern="[a-z][a-z0-9_]{0,63}" placeholder="ma_thua"></div>
+    <div><label>Kiểu dữ liệu</label><select class="param-type">
+      <option value="string">Văn bản</option><option value="integer">Số nguyên</option>
+      <option value="number">Số thập phân</option><option value="boolean">Có / không</option>
     </select></div>
-    <label class="required"><input class="param-required" type="checkbox" checked> Required</label>
-    <button class="remove" type="button">Remove</button>`;
+    <label class="required"><input class="param-required" type="checkbox" checked> Bắt buộc</label>
+    <button class="remove" type="button" aria-label="Xóa thông tin đầu vào">Xóa</button>`;
   row.querySelector(".remove").addEventListener("click", () => row.remove());
   parameterList.append(row);
 }
@@ -178,7 +277,7 @@ document.querySelector("#add-parameter").addEventListener("click", addParameter)
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   result.className = "";
-  result.textContent = "Creating scaffold…";
+  result.textContent = "Đang tạo khung mã…";
   const payload = {
     name: form.elements.name.value,
     description: form.elements.description.value,
@@ -194,12 +293,12 @@ form.addEventListener("submit", async (event) => {
       method: "POST", headers, body: JSON.stringify(payload)
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
-    result.textContent = `Created ${data.file}. Complete its handler, then restart MCP.`;
+    if (!response.ok) throw new Error(data.error || "Không tạo được công cụ. Hãy kiểm tra thông tin đã nhập.");
+    result.textContent = `Đã tạo ${data.file}. Đây mới là khung mã; cần hoàn thiện phần xử lý rồi khởi động lại MCP.`;
     form.reset();
     parameterList.replaceChildren();
   } catch (error) {
-    result.textContent = error.message;
+    result.textContent = error.message || "Đã xảy ra lỗi khi tạo công cụ.";
     result.className = "error";
   }
 });
@@ -241,6 +340,8 @@ def validate_tool_spec(spec: Any) -> dict[str, Any]:
     name = spec["name"]
     if not isinstance(name, str) or not _IDENTIFIER.fullmatch(name) or keyword.iskeyword(name):
         raise ToolBuilderError("Tool name must be a lowercase Python-style identifier (1-64 characters).")
+    if name.startswith("c3d_"):
+        raise ToolBuilderError("Tool names starting with 'c3d_' are reserved for Civil 3D API tools.")
     if name in _builtin_tool_names():
         raise ToolBuilderError(f"Tool name '{name}' is already used by a built-in MCP tool.")
 

@@ -19,32 +19,49 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         name="create_cogo_point",
         description=(
             "Create a new COGO (Coordinate Geometry) point in the active Civil 3D "
-            "drawing. Provide northing, easting, optional elevation and description. "
+            "drawing. Provide easting/northing or X/Y, optional elevation or Z, "
+            "and description. "
             "Returns the assigned point number and coordinates."
         ),
     )
     async def create_cogo_point(
-        northing: float,
-        easting: float,
-        elevation: float = 0.0,
+        easting: float | None = None,
+        northing: float | None = None,
+        elevation: float | None = None,
         description: str = "",
+        X: float | None = None,
+        Y: float | None = None,
+        Z: float | None = None,
     ) -> dict[str, Any]:
         """
         Parameters
         ----------
-        northing : float
-            Y coordinate (northing) in drawing units.
-        easting : float
-            X coordinate (easting) in drawing units.
-        elevation : float
-            Z elevation in drawing units (default 0.0).
+        easting, northing : float, optional
+            Coordinates in drawing units. Alternatively provide X and Y.
+        elevation : float, optional
+            Elevation in drawing units (default 0.0). Alternatively provide Z.
         description : str
             Point description / raw description text.
         """
         try:
+            if easting is not None and X is not None:
+                raise Civil3DError("Provide either easting or X, not both.")
+            if northing is not None and Y is not None:
+                raise Civil3DError("Provide either northing or Y, not both.")
+            if elevation is not None and Z is not None:
+                raise Civil3DError("Provide either elevation or Z, not both.")
+            resolved_easting = easting if easting is not None else X
+            resolved_northing = northing if northing is not None else Y
+            if resolved_easting is None or resolved_northing is None:
+                raise Civil3DError(
+                    "Provide easting and northing, or their X and Y aliases."
+                )
             return await run_com(
                 client.create_cogo_point,
-                northing, easting, elevation, description,
+                northing=resolved_northing,
+                easting=resolved_easting,
+                elevation=elevation if elevation is not None else (Z or 0.0),
+                description=description,
             )
         except Civil3DError as exc:
             return {"error": str(exc)}

@@ -1,10 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "1031weather-scaffold-test"
+name = "civil3d-mcp"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
+description = "MCP server for Autodesk Civil 3D automation on Windows"
+readme = "SkillC3D.md"
+requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.28.1",
     "fastmcp>=0.4.1",
+    "pydantic>=2.0",
+    "pywin32>=306; platform_system == 'Windows'",
+    "pythonnet>=3.0.3; platform_system == 'Windows'",
 ]
+
+[project.scripts]
+civil3d-mcp = "civil3d_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

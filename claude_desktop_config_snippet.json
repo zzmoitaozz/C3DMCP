@@ -1,23 +1,8 @@
 {
   "mcpServers": {
- "civil3d-mcp": {
-      "type": "uv",
-      "args": ["civil3d-mcp"]
-     
-    },
-
-  "_alternative_after_pip_install": {
-    "_comment": "If you installed with 'pip install -e .', use this instead:",
-    "mcpServers": {
-      "civil3d-mcp": {
-        "command": "civil3d-mcp"
-      }
+    "civil3d-mcp": {
+      "command": "civil3d-mcp",
+      "args": ["serve", "--web-port", "-1"]
     }
   }
-},
-
-    "_comment": "Add the block below to your claude_desktop_config.json under 'mcpServers'.",
-  "_location_windows": "C:\\Users\\Quang\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json"
-
-  
 }

@@ -17,7 +17,7 @@
 ```bash
 # 1. Clone
 git clone https://github.com/zzmoitaozz/C3DMCP
-cd civil3d-mcp-python
+cd C3DMCP
 
 # 2. Install dependencies (Windows, Python 3.11)
 pip install -r requirements.txt
@@ -41,37 +41,47 @@ copy .env.example .env
 
 ### Claude Desktop
 
-Edit `%APPDATA%\Claude\claude_desktop_config.json` and add:
+Install this package in the Python environment used by Claude Desktop, then merge
+the valid JSON in `claude_desktop_config_snippet.json` into
+`%APPDATA%\Claude\claude_desktop_config.json`. If `civil3d-mcp` is not on
+Claude Desktop's `PATH`, replace `command` with the full path to the executable
+or use `python` with `-m civil3d_mcp` from the project environment. Start Civil
+3D and open a drawing before restarting Claude Desktop.
 
-```json
-{
-  "mcpServers": {
-    "civil3d-mcp": {
-      "command": "civil3d-mcp"
-    }
-  }
-}
+The local stdio setup is the supported default. The MCP server attaches to
+Civil 3D through Windows COM, so it must run on the **same Windows computer and
+interactive user session** as Civil 3D. A Claude Desktop client on another
+computer cannot directly automate its own Civil 3D process through this local
+stdio configuration.
+
+### Remote MCP client
+
+Remote use runs the MCP server on the Windows host where Civil 3D is open, then
+connects a remote MCP client to its Streamable HTTP endpoint (`/mcp`). This
+project's HTTP mode requires a high-entropy bearer token; binding beyond
+localhost additionally requires TLS certificate/key files and at least one
+allowed host. Example on the Civil 3D host:
+
+```powershell
+$env:CIVIL3D_MCP_HTTP_TOKEN = "<at-least-32-random-characters>"
+civil3d-mcp serve --transport http --host 0.0.0.0 --port 8766 `
+  --ssl-certfile "C:\certs\civil3d-mcp.crt" `
+  --ssl-keyfile "C:\certs\civil3d-mcp.key" `
+  --allowed-host "civil3d-host.example.com" --web-port -1
 ```
 
-Or, if you prefer to run without installing the package:
+The remote client must support Streamable HTTP and sending the matching
+`Authorization: Bearer ...` header. This repo's `install-claude` helper only
+installs the local stdio entry; it does not configure a remote Claude Desktop
+connection. Verify the exact remote-server and custom-header setup supported by
+the installed Claude Desktop version before relying on remote access. Do not
+expose the endpoint to the public internet; use a trusted private network or
+VPN, firewall rules, TLS, and a private token. Network connectivity alone does
+not make Windows COM control Civil 3D on the client computer.
 
-```json
-{
-  "mcpServers": {
-    "civil3d-mcp": {
-      "command": "python",
-      "args": ["-m", "civil3d_mcp.server"],
-      "cwd": "C:\\path\\to\\civil3d-mcp-python",
-      "env": {
-        "PYTHONPATH": "C:\\path\\to\\civil3d-mcp-python\\src",
-        "CIVIL3D_BIN_PATH": "C:\\Program Files\\Autodesk\\AutoCAD 2026"
-      }
-    }
-  }
-}
-```
-
-Restart Claude Desktop. The **hammer icon** (🔨) in the toolbar confirms the server is connected.
+Restart Claude Desktop after configuration. Its MCP connection indicator
+confirms a server connection, but does not prove Civil 3D is available until a
+tool call succeeds.
 
 ### Environment variables
 
@@ -79,10 +89,14 @@ Restart Claude Desktop. The **hammer icon** (🔨) in the toolbar confirms the s
 |---|---|---|
 | `CIVIL3D_BIN_PATH` | Auto-detected | Path to folder containing `AeccDbMgd.dll` |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `CIVIL3D_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `CIVIL3D_MCP_HOST` | `127.0.0.1` | HTTP bind address |
+| `CIVIL3D_MCP_PORT` | `8766` | HTTP port |
+| `CIVIL3D_MCP_HTTP_TOKEN` | — | Required bearer token for HTTP (minimum 32 characters) |
 
 ---
 
-## Available tools (19 total)
+## Available tools
 
 ### Drawing
 | Tool | Description |
@@ -94,7 +108,7 @@ Restart Claude Desktop. The **hammer icon** (🔨) in the toolbar confirms the s
 ### COGO Points
 | Tool | Description |
 |---|---|
-| `create_cogo_point` | Create a point at (northing, easting, elevation) STILL WIP!!!!|
+| `create_cogo_point` | Create a point at (northing, easting, elevation) |
 | `list_cogo_points` | List all COGO points |
 | `delete_cogo_point` | Delete a point by point number |
 
@@ -104,6 +118,15 @@ Restart Claude Desktop. The **hammer icon** (🔨) in the toolbar confirms the s
 | `create_line` | Create a 3D line from two points |
 | `create_polyline` | Create a 3D polyline from a vertex list |
 | `list_lines` | List all lines/polylines, optionally by layer |
+| `create_solid_box` | Create an axis-aligned 3D box solid from a lower corner and positive dimensions |
+| `create_checkpoint` | Mark the active drawing's current undo history |
+| `restore_checkpoint` | Undo changes back to the latest checkpoint in this server session |
+
+Checkpoints are in-memory session identifiers backed by AutoCAD's undo history:
+they are not saved files, survive neither server restarts nor drawing changes,
+and only the latest checkpoint can be restored. Restoring undoes drawing edits;
+use it deliberately. Live command-queue behavior still depends on Civil 3D's
+`SendCommand`/UNDO implementation.
 
 ### Surfaces
 | Tool | Description |
@@ -143,38 +166,49 @@ Restart Claude Desktop. The **hammer icon** (🔨) in the toolbar confirms the s
 "What is the station and offset of point (45300, 87450) relative to alignment CL-MAIN?"
 
 "Create a polyline on layer BOUNDARY with vertices at (0,0,0), (100,0,0), (100,100,0), (0,100,0) and close it"
+
+"Create a box solid at (100, 200, 0) with length 10, width 6, and height 3 on layer MASSING"
+
+"Create a checkpoint before modifying the drawing"
 ```
+
+These tools do not infer terrain extents from arbitrary drawing entities and do
+not create TIN surfaces automatically. A box solid is geometric drawing
+content, not a terrain model.
+
+### Discovered Civil 3D API tools
+
+The server also registers `c3d_api_categories` and four generated tools for
+each API category: `c3d_<category>_api`, `_list`, `_get`, and `_invoke`.
+Categories currently cover alignments, corridors, COGO points, drawing,
+feature lines, parcels, pipe and pressure networks, profiles, sample lines,
+styles, surfaces, and survey. Discovery reads Civil 3D type libraries on the
+machine running the server; the generated tools are present even when a local
+type library scan yields no members, but their catalog will then be empty.
 
 ---
 
 ## Project structure
 
 ```
-civil3d-mcp-python/
+C3DMCP/
 ├── src/
 │   └── civil3d_mcp/
-│       ├── __init__.py           # Public API: Civil3DClient, Civil3DError
-│       ├── server.py             # FastMCP app, lifecycle, tool registration
-│       ├── client.py             # Civil3DClient — all COM/pythonnet calls
-│       ├── tools_drawing.py      # Tools 1-3:  drawing info
-│       ├── tools_cogo.py         # Tools 4-6:  COGO points
-│       ├── tools_lines.py        # Tools 7-9:  lines & polylines
-│       ├── tools_surfaces.py     # Tools 10-13: surfaces
-│       ├── tools_alignments.py  # Tools 14-18: alignments & profiles
-│       └── tools_corridors.py   # Tool  19:    corridors
+│       ├── client.py             # Civil 3D COM/pythonnet operations
+│       ├── server.py             # MCP server and tool registration
+│       ├── tools_api.py          # Generated Civil 3D API tools
+│       ├── api_discovery.py      # Civil 3D API discovery
+│       ├── tool_builder.py       # Custom tool management
+│       └── tools_*.py            # Drawing, COGO, geometry, and Civil 3D tools
 ├── tests/
-│   ├── __init__.py
-│   └── test_tools.py             # pytest suite (fully mocked COM)
-├── setup.py                      # Legacy setuptools entry point
+│   └── test_*.py                 # Mocked COM and tool tests
 ├── setup_check.py                # Pre-flight environment checker
 ├── pyproject.toml                # PEP 517/518 build config
 ├── requirements.txt              # Runtime dependencies
 ├── requirements-dev.txt          # Dev/test dependencies
-├── conftest.py                   # pytest sys.path injection
 ├── .env.example                  # Environment variable template
 ├── claude_desktop_config_snippet.json
-├── ARCHITECTURE.md               # Full system design documentation
-└── README.md
+└── SkillC3D.md                   # Setup, deployment, and tool documentation
 ```
 
 ---
@@ -198,7 +232,8 @@ Tests use a fully mocked `Civil3DClient` — no Civil 3D installation required t
 
 **"Civil 3D .NET assemblies not found"**  
 → Set `CIVIL3D_BIN_PATH` in `.env` to the folder containing `AeccDbMgd.dll`  
-→ Default path: `C:\Program Files\Autodesk\AutoCAD 2024`
+→ Default paths include the Civil 3D folders for AutoCAD 2023–2026; set
+  `CIVIL3D_BIN_PATH` to the directory containing `AeccDbMgd.dll` if needed.
 
 **"Surfaces / Alignments collection not accessible"**  
 → Ensure you launched Civil 3D (not plain AutoCAD). The server falls back to AutoCAD's ProgID if the Civil 3D ProgID isn't registered.

@@ -113,3 +113,57 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
             return {"lines": lines, "count": len(lines)}
         except Civil3DError as exc:
             return {"error": str(exc)}
+
+    @mcp.tool(
+        name="create_solid_box",
+        description=(
+            "Create an axis-aligned 3D box solid in the active drawing's model space. "
+            "Provide its lower corner and positive length, width, and height."
+        ),
+    )
+    async def create_solid_box(
+        x: float,
+        y: float,
+        z: float,
+        length: float,
+        width: float,
+        height: float,
+        layer: str = "0",
+    ) -> dict[str, Any]:
+        """Create a 3D box from its origin and dimensions."""
+        try:
+            return await run_com(
+                client.create_solid_box, x, y, z, length, width, height, layer
+            )
+        except Civil3DError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool(
+        name="create_checkpoint",
+        description=(
+            "Mark the current drawing's undo history. Returns a checkpoint ID that "
+            "can be used with restore_checkpoint; only the latest checkpoint in "
+            "this server session is restorable."
+        ),
+    )
+    async def create_checkpoint() -> dict[str, Any]:
+        """Create a restore point in the active drawing's undo history."""
+        try:
+            return await run_com(client.create_checkpoint)
+        except Civil3DError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool(
+        name="restore_checkpoint",
+        description=(
+            "Undo changes in the drawing back to the latest checkpoint created "
+            "in this server session. Requires its checkpoint_id and the same "
+            "drawing to remain active."
+        ),
+    )
+    async def restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
+        """Restore the active drawing to a checkpoint created by this server."""
+        try:
+            return await run_com(client.restore_checkpoint, checkpoint_id)
+        except Civil3DError as exc:
+            return {"error": str(exc)}

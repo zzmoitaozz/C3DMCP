@@ -101,9 +101,42 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         except Civil3DError as exc:
             return {"error": str(exc)}
 
+    @mcp.tool(
+        name="tool_surface_mng",
+        description=(
+            "Tạo TIN surface từ các điểm COGO có mô tả hoặc tên khớp chính xác "
+            "với mã điểm (mặc định EG), sau đó tạo profile lấy cao độ từ surface "
+            "cho tất cả alignment. Kết quả nêu rõ profile thành công/thất bại; "
+            "công cụ không tự tạo Profile View."
+        ),
+    )
+    async def tool_surface_mng(
+        surface_name: str = "EG_Surface",
+        profile_name: str = "EG_Profile",
+        point_description: str = "EG",
+    ) -> dict[str, Any]:
+        """
+        Parameters
+        ----------
+        surface_name : str
+            Tên surface TIN mới.
+        profile_name : str
+            Tên profile lấy cao độ từ surface trên mỗi alignment.
+        point_description : str
+            Mô tả hoặc tên COGO point cần chọn; so khớp chính xác, không phân biệt hoa thường.
+        """
+        try:
+            return await run_com(
+                client.create_surface_from_eg_cogo_points,
+                surface_name,
+                profile_name,
+                point_description,
+            )
+        except Civil3DError as exc:
+            return {"error": str(exc)}
+
     # ------------------------------------------------------------------
     # Future tools to add:
-    # - create_surface_from_points
     # - create_surface_from_dem
     # - create_surface_from_tin
     # - add_breakline_to_surface
