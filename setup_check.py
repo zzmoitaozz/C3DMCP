@@ -87,9 +87,9 @@ def _import_ok(module: str) -> tuple[bool, str]:
 
 
 def check_fastmcp() -> CheckResult:
-    ok, ver = _import_ok("mcp")
+    ok, ver = _import_ok("fastmcp")
     return CheckResult(
-        name="fastmcp / mcp package",
+        name="FastMCP",
         passed=ok,
         detail=f"version: {ver}" if ok else ver,
         fix_hint="pip install fastmcp" if not ok else "",
@@ -139,20 +139,42 @@ def check_pydantic() -> CheckResult:
 # --------------- Civil 3D binary paths ---------------
 
 _CANDIDATE_ROOTS = [
+    r"C:\Program Files\Autodesk\AutoCAD 2026\C3D",
+    r"C:\Program Files\Autodesk\AutoCAD 2026",
+    r"C:\Program Files\Autodesk\AutoCAD 2025\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2025",
+    r"C:\Program Files\Autodesk\AutoCAD 2024\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2024",
+    r"C:\Program Files\Autodesk\AutoCAD 2023\C3D",
     r"C:\Program Files\Autodesk\AutoCAD 2023",
 ]
-_REQUIRED_DLLS = ["AeccDbMgd.dll", "AeccLandMgd.dll", "acdbmgd.dll"]
+_REQUIRED_DLLS = ["AeccDbMgd.dll", "acdbmgd.dll"]
+
+
+def _candidate_roots() -> list[str]:
+    roots: list[str] = []
+    env_path = os.getenv("CIVIL3D_BIN_PATH", "").strip()
+    if env_path and Path(env_path).is_dir():
+        roots.append(env_path)
+        parent = str(Path(env_path).parent)
+        if parent != env_path:
+            roots.append(parent)
+    roots.extend(_CANDIDATE_ROOTS)
+    return list(dict.fromkeys(roots))
 
 
 def _find_civil3d_root() -> str | None:
-    env_path = os.getenv("CIVIL3D_BIN_PATH", "").strip()
-    if env_path and Path(env_path).is_dir():
-        return env_path
-    for root in _CANDIDATE_ROOTS:
-        if Path(root).is_dir():
+    for root in _candidate_roots():
+        if Path(root, "AeccDbMgd.dll").exists():
             return root
+    return None
+
+
+def _find_autodesk_dll(dll: str) -> str | None:
+    for root in _candidate_roots():
+        path = Path(root, dll)
+        if path.is_file():
+            return str(path)
     return None
 
 
@@ -164,7 +186,7 @@ def check_civil3d_install() -> CheckResult:
             passed=False,
             detail="No Civil 3D folder found in default paths.",
             fix_hint=(
-                "Install Civil 3D 2023-2025, or set CIVIL3D_BIN_PATH "
+                "Install Civil 3D 2023-2026, or set CIVIL3D_BIN_PATH "
                 "in .env to the folder containing AeccDbMgd.dll."
             ),
         )
@@ -183,15 +205,13 @@ def check_autodesk_dlls() -> CheckResult:
             passed=False,
             detail="Civil 3D root not found (see previous check).",
         )
-    missing = [
-        dll for dll in _REQUIRED_DLLS
-        if not Path(root, dll).exists()
-    ]
+    found = {dll: _find_autodesk_dll(dll) for dll in _REQUIRED_DLLS}
+    missing = [dll for dll, path in found.items() if path is None]
     if missing:
         return CheckResult(
             name="Autodesk .NET DLLs",
             passed=False,
-            detail=f"Missing in {root}: {', '.join(missing)}",
+            detail=f"Missing: {', '.join(missing)} (searched Civil 3D/AutoCAD roots).",
             fix_hint=(
                 "Ensure a full Civil 3D installation is present, "
                 "or set CIVIL3D_BIN_PATH to the correct folder."
@@ -200,7 +220,7 @@ def check_autodesk_dlls() -> CheckResult:
     return CheckResult(
         name="Autodesk .NET DLLs",
         passed=True,
-        detail=f"All found in: {root}",
+        detail="Found: " + ", ".join(f"{dll}={path}" for dll, path in found.items()),
     )
 
 

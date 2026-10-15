@@ -1,0 +1,41 @@
+{
+	"servers": {
+		
+		"io.github.github/github-mcp-server": {
+			"type": "http",
+			"url": "https://api.githubcopilot.com/mcp/",
+			"gallery": "https://api.mcp.github.com",
+			"version": "2.0.1"
+		},
+		"microsoft/playwright-mcp": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"@playwright/mcp@latest"
+			],
+			"gallery": "https://api.mcp.github.com",
+			"version": "0.0.1-seed"
+		},
+		"com.microsoft/azure": {
+			"type": "stdio",
+			"command": "dnx",
+			"args": [
+				"Azure.Mcp@3.0.0-beta.48",
+				"--yes",
+				"--",
+				"server",
+				"start"
+			],
+			"gallery": "https://api.mcp.github.com",
+			"version": "3.0.0-beta.48"
+		},
+		"io.draw/mcp": {
+			"type": "http",
+			"url": "https://mcp.draw.io/mcp",
+			"gallery": "https://api.mcp.github.com",
+			"version": "1.0.3"
+		}
+		
+	},
+	"inputs": []
+}

@@ -125,15 +125,15 @@ def _pip(*args: str, check: bool = True) -> int:
 # ---------------------------------------------------------------------------
 
 RUNTIME_PACKAGES = [
-    "fastmcp>=0.4.0",
+    "mcp",
     "pywin32>=306",
     "pythonnet>=3.0.3",
     "pydantic>=2.0",
 ]
 
 BUILD_BOOTSTRAP = [
-    "pip>=24.0",
-    "setuptools>=68",
+    "pip>=26.0",
+    "setuptools",
     "wheel",
 ]
 
@@ -142,7 +142,7 @@ DEV_PACKAGES = [
     "pytest-asyncio>=0.23",
     "black>=24.0",
     "ruff>=0.4",
-    "mypy>=1.10",
+    "mypy",
 ]
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ def install_package_editable() -> None:
 # ---------------------------------------------------------------------------
 
 VERIFY_MODULES: list[tuple[str, str]] = [
-    ("mcp.server.fastmcp",  "FastMCP framework  (mcp / fastmcp)"),
+    ("mcp",             "MCP framework  (mcp)"),
     ("pydantic",            "Pydantic"),
     ("win32com.client",     "pywin32  (win32com)"),
     ("pythoncom",           "pywin32  (pythoncom)"),
@@ -225,7 +225,7 @@ def print_summary(dev: bool) -> None:
     print("  1. Open Autodesk Civil 3D and load a drawing.")
     print()
     print("  2. Start the MCP server:")
-    print("       py -3.11-64 -m civil3d_mcp.server")
+    print("       py -m civil3d_mcp.server")
     print("       # or, after editable install:")
     print("       civil3d-mcp")
     print()

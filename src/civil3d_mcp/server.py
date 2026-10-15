@@ -13,15 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hmac
+import ipaddress
 import logging
-from contextlib import asynccontextmanager
+import os
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Callable, Any
+from contextlib import asynccontextmanager
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, TokenVerifier
 
+from . import (
+    tools_alignments,
+    tools_api,
+    tools_cogo,
+    tools_corridors,
+    tools_drawing,
+    tools_lines,
+    tools_surfaces,
+)
 from .client import Civil3DClient, Civil3DError
-from . import tools_drawing, tools_cogo, tools_lines, tools_surfaces, tools_alignments, tools_corridors
+from .custom_tools import register_custom_tools
+from .tool_builder import _builtin_tool_names
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -36,6 +51,18 @@ log = logging.getLogger("civil3d_mcp")
 # Shared Civil 3D client  (one COM connection for the server lifetime)
 # ---------------------------------------------------------------------------
 client = Civil3DClient()
+_tool_execution_enabled = True
+
+
+def set_tool_execution_enabled(enabled: bool) -> bool:
+    """Enable or pause execution of Civil 3D MCP tools."""
+    global _tool_execution_enabled
+    _tool_execution_enabled = enabled
+    return _tool_execution_enabled
+
+
+def tool_execution_enabled() -> bool:
+    return _tool_execution_enabled
 
 
 def _com_thread_init() -> None:
@@ -71,6 +98,8 @@ async def run_com(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     (-2147417842).  This helper ensures every client call is dispatched to the
     correct thread.
     """
+    if not _tool_execution_enabled:
+        raise Civil3DError("MCP tool execution is paused by remote control.")
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, functools.partial(fn, *args, **kwargs))
 
@@ -84,7 +113,16 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(_executor, client.connect)
-        log.info("civil3d-mcp ready  |  19 tools registered")
+        total_tools = len(await mcp.list_tools())
+        log.info(
+            "civil3d-mcp ready | toolset=%s, %d tools total, %d static baseline tools, "
+            "%d generated API tools, and %d custom tool modules",
+            selected_toolset,
+            total_tools,
+            len(_builtin_tool_names()),
+            generated_api_tool_count,
+            custom_tool_modules,
+        )
     except Civil3DError as exc:
         log.error("Could not connect to Civil 3D: %s", exc)
         log.error(
@@ -108,27 +146,123 @@ mcp = FastMCP(
     instructions=(
         "AI-powered Autodesk Civil 3D automation via COM (pythonnet + win32com). "
         "Supports drawing queries, COGO points, lines/polylines, surfaces "
-        "and alignments. Civil 3D must be running on the same Windows machine."
+        "and alignments, box solids, and drawing undo checkpoints. Civil 3D "
+        "must be running in the same interactive Windows session as this server. "
+        "Remote HTTP access requires a supported MCP client, bearer token, and TLS."
     ),
     lifespan=lifespan,
 )
 
+
+class _EnvironmentBearerTokenVerifier(TokenVerifier):
+    """Verify one high-entropy bearer token without storing a token map."""
+
+    def __init__(self, expected_token: str) -> None:
+        super().__init__()
+        self._expected_token = expected_token
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(token, self._expected_token):
+            return None
+        return AccessToken(
+            token=token,
+            client_id="civil3d-mcp",
+            scopes=[],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Register all tool groups  (pass run_com so tools dispatch via executor)
 # ---------------------------------------------------------------------------
-tools_drawing.register(mcp, client, run_com)
-tools_cogo.register(mcp, client, run_com)
-tools_lines.register(mcp, client, run_com)
-tools_surfaces.register(mcp, client, run_com)
-tools_alignments.register(mcp, client, run_com)
-tools_corridors.register(mcp, client, run_com)
+def _toolset_mode() -> str:
+    mode = os.environ.get("CIVIL3D_TOOLSET", "full").strip().lower()
+    if mode in {"", "full"}:
+        return "full"
+    if mode == "core":
+        return "core"
+    log.warning("Unknown CIVIL3D_TOOLSET=%r. Falling back to 'full'.", mode)
+    return "full"
+
+
+def _static_registrars_for(mode: str) -> list[Callable[[FastMCP, Civil3DClient, Callable], None]]:
+    core = [
+        tools_drawing.register,
+        tools_cogo.register,
+        tools_surfaces.register,
+    ]
+    if mode == "core":
+        return core
+    return core + [
+        tools_lines.register,
+        tools_alignments.register,
+        tools_corridors.register,
+    ]
+
+
+selected_toolset = _toolset_mode()
+for registrar in _static_registrars_for(selected_toolset):
+    registrar(mcp, client, run_com)
+generated_api_tool_count = tools_api.register(mcp, client, run_com)
+custom_tool_modules = register_custom_tools(mcp, client, run_com)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def main() -> None:
-    mcp.run()
+def main(
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8766,
+    token: str | None = None,
+    ssl_certfile: str | None = None,
+    ssl_keyfile: str | None = None,
+    allowed_hosts: list[str] | None = None,
+) -> None:
+    if transport == "stdio":
+        mcp.auth = None
+        mcp.run(transport="stdio")
+        return
+    if transport != "http":
+        raise ValueError(f"Unsupported MCP transport: {transport}")
+    if not token or len(token) < 32:
+        raise ValueError(
+            "HTTP transport requires CIVIL3D_MCP_HTTP_TOKEN to contain "
+            "at least 32 characters."
+        )
+
+    try:
+        bind_is_loopback = (
+            host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+        )
+    except ValueError:
+        bind_is_loopback = False
+
+    remote_hosts = [value for value in (allowed_hosts or []) if value]
+    if not bind_is_loopback:
+        if not ssl_certfile or not ssl_keyfile:
+            raise ValueError(
+                "A non-loopback HTTP bind requires TLS certificate and key files."
+            )
+        if not remote_hosts:
+            raise ValueError(
+                "A non-loopback HTTP bind requires at least one --allowed-host."
+            )
+    mcp.auth = _EnvironmentBearerTokenVerifier(token)
+    http_options: dict[str, Any] = {
+        "transport": "http",
+        "host": host,
+        "port": port,
+        "path": "/mcp",
+        "host_origin_protection": True,
+    }
+    if remote_hosts:
+        http_options["allowed_hosts"] = remote_hosts
+    if ssl_certfile and ssl_keyfile:
+        http_options["uvicorn_config"] = {
+            "ssl_certfile": ssl_certfile,
+            "ssl_keyfile": ssl_keyfile,
+        }
+    mcp.run(**http_options)
 
 
 if __name__ == "__main__":

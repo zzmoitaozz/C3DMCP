@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "Filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem"
+      ]
+    },
+    "Memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    }
+  }
+}
