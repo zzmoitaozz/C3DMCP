@@ -26,7 +26,7 @@ _KNOWN_BUILTIN_TOOLS = frozenset(
         "list_surfaces", "get_surface_info", "sample_surface_elevation", "list_surface_definition",
         "tool_surface_mng",
         "create_line", "create_polyline", "list_lines",
-        "create_solid_box", "create_checkpoint", "restore_checkpoint",
+        "create_solid_box", "create_solid_primitive", "create_checkpoint", "restore_checkpoint",
         "get_drawing_info", "list_civil_object_types", "get_selected_objects_info",
         "get_corridor_info",
         "create_cogo_point", "list_cogo_points", "delete_cogo_point",
@@ -68,7 +68,7 @@ _PAGE = r"""<!doctype html>
     .intro { margin-top: 6px; font-size: 1.05rem; }
     label { display: block; margin: 14px 0 5px; font-weight: 600; }
     input, textarea, select, button { font: inherit; }
-    input[type=text], textarea, select { box-sizing: border-box; width: 100%;
+    input[type=text], input[type=password], textarea, select { box-sizing: border-box; width: 100%;
       padding: 9px 10px; border: 1px solid #b8c4d4; border-radius: 6px; }
     textarea { min-height: 84px; resize: vertical; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
@@ -100,13 +100,32 @@ _PAGE = r"""<!doctype html>
 </head>
 <body>
 <main data-mode="__MODE__">
+  <section id="login-panel"__LOGIN_HIDDEN__>
+    <h1>Đăng nhập Công cụ Civil 3D</h1>
+    <p class="hint">Nhập mã truy cập LAN do máy chủ hiển thị để tiếp tục.</p>
+    <form id="login-form">
+      <label for="login-token">Mã truy cập</label>
+      <input id="login-token" type="password" autocomplete="current-password" required>
+      <p><button type="submit">Đăng nhập</button></p>
+    </form>
+    <p id="login-error" class="error" role="alert" aria-live="assertive"></p>
+  </section>
+  <div id="app-content"__APP_HIDDEN__>
   <h1>Công cụ Civil 3D</h1>
   <p class="intro">Chọn một việc bạn muốn làm, rồi sao chép câu gợi ý để gửi cho trợ lý MCP.</p>
+  <div class="toolbar" id="account-bar" hidden>
+    <span>Đã đăng nhập vào giao diện LAN.</span>
+    <button class="secondary" id="logout" type="button">Đăng xuất</button>
+  </div>
   <section id="status">
     <h2>Trạng thái kết nối</h2>
     <p id="status-text" aria-live="polite">Đang kiểm tra kết nối…</p>
     <p id="status-dir" class="hint"></p>
     <p id="status-tools" class="hint"></p>
+    <div class="toolbar">
+      <button class="secondary" id="toggle-server" type="button" hidden>Đang tải trạng thái…</button>
+      <span id="server-control-note" class="hint"></span>
+    </div>
     <button class="secondary" id="link-claude" type="button">Kết nối Claude Desktop</button>
   </section>
   <section aria-labelledby="tools-heading">
@@ -130,10 +149,6 @@ _PAGE = r"""<!doctype html>
       <label for="description">Công cụ sẽ làm gì?</label>
       <textarea id="description" name="description" maxlength="1000" required
         placeholder="Mô tả ngắn gọn kết quả công cụ cần trả về"></textarea>
-      <div id="token-section" hidden>
-        <label for="token">Mã truy cập khi mở trang trong mạng nội bộ</label>
-        <input id="token" type="text" autocomplete="off" spellcheck="false">
-      </div>
       <h2>Thông tin đầu vào (nếu cần)</h2>
       <p class="hint">Mỗi thông tin đầu vào là một giá trị mà người dùng cần cung cấp, ví dụ mã thửa hoặc cao độ.</p>
       <div id="parameters"></div>
@@ -142,13 +157,116 @@ _PAGE = r"""<!doctype html>
     </form>
     <div id="result" role="status" aria-live="polite"></div>
   </details>
+  </div>
 </main>
 <script>
 const form = document.querySelector("#tool-form");
 const parameterList = document.querySelector("#parameters");
 const result = document.querySelector("#result");
 const mode = document.querySelector("main").dataset.mode;
-document.querySelector("#token-section").hidden = mode !== "lan";
+const tokenStorageKey = "civil3d-mcp-tool-builder-token";
+const loginPanel = document.querySelector("#login-panel");
+const appContent = document.querySelector("#app-content");
+const loginError = document.querySelector("#login-error");
+let accessToken = "";
+
+function setAuthenticated(authenticated) {
+  loginPanel.hidden = mode !== "lan" || authenticated;
+  appContent.hidden = mode === "lan" && !authenticated;
+  document.querySelector("#account-bar").hidden = mode !== "lan" || !authenticated;
+}
+
+function renderStatus(data) {
+  const text = document.querySelector("#status-text");
+  text.textContent = "MCP: " +
+    (data.tool_execution_enabled === false ? "đang tạm dừng công cụ" : "đang hoạt động") +
+    " | Civil 3D: " +
+    (data.civil3d_connected ? "đã kết nối" : "chưa kết nối");
+  text.className = data.civil3d_connected ? "" : "hint";
+  const control = document.querySelector("#toggle-server");
+  const controllable = typeof data.tool_execution_enabled === "boolean";
+  control.hidden = !controllable;
+  if (controllable) {
+    control.dataset.enabled = String(data.tool_execution_enabled);
+    control.textContent = data.tool_execution_enabled
+      ? "Tạm dừng công cụ MCP"
+      : "Bật lại công cụ MCP";
+    document.querySelector("#server-control-note").textContent =
+      data.tool_execution_enabled
+        ? "Các công cụ đang được phép thực thi."
+        : "Các công cụ đang bị tạm dừng; giao diện vẫn hoạt động để bật lại.";
+  }
+  document.querySelector("#status-dir").textContent = "Thư mục công cụ tùy chỉnh: " + data.tools_directory;
+  document.querySelector("#status-tools").textContent =
+    "Tool đã đăng ký: " + (data.static_tool_count ?? "?") +
+    " tĩnh | " + (data.generated_api_tool_count ?? "?") + " API | " +
+    (data.custom_tool_module_count ?? "?") + " module tùy chỉnh" +
+    " | Tệp tùy chỉnh: " + (data.custom_tools.join(", ") || "chưa có");
+}
+
+document.querySelector("#toggle-server").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const enabled = button.dataset.enabled !== "true";
+    const response = await fetchApi("/api/server/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Không thể đổi trạng thái công cụ MCP.");
+    renderStatus(data);
+  } catch (error) {
+    document.querySelector("#server-control-note").textContent =
+      error.message || "Đã xảy ra lỗi khi đổi trạng thái.";
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function authenticate(token) {
+  const response = await fetch("/api/status", {
+    headers: { Authorization: "Bearer " + token }
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Mã truy cập không hợp lệ.");
+  accessToken = token;
+  sessionStorage.setItem(tokenStorageKey, token);
+  loginError.textContent = "";
+  setAuthenticated(true);
+  renderStatus(data);
+}
+
+if (mode === "lan") {
+  setAuthenticated(false);
+  document.querySelector("#login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    loginError.textContent = "";
+    try {
+      await authenticate(document.querySelector("#login-token").value.trim());
+      document.querySelector("#login-token").value = "";
+    } catch (error) {
+      loginError.textContent = error.message || "Không thể đăng nhập.";
+    }
+  });
+  document.querySelector("#logout").addEventListener("click", () => {
+    accessToken = "";
+    sessionStorage.removeItem(tokenStorageKey);
+    setAuthenticated(false);
+    document.querySelector("#login-token").value = "";
+    document.querySelector("#login-token").focus();
+  });
+  const savedToken = sessionStorage.getItem(tokenStorageKey);
+  if (savedToken) {
+    authenticate(savedToken).catch((error) => {
+      sessionStorage.removeItem(tokenStorageKey);
+      loginError.textContent = error.message || "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
+    });
+  }
+} else {
+  setAuthenticated(true);
+}
 
 const toolGuides = [
   ["Điểm COGO", "create_cogo_point", "Tạo một điểm COGO từ tọa độ.", "Tạo điểm COGO tại tọa độ X (hướng Đông) là …, Y (hướng Bắc) là …, cao độ …, mô tả …."],
@@ -214,24 +332,29 @@ document.querySelector("#search").addEventListener("input", (event) =>
   renderTools(event.target.value));
 renderTools();
 
-const authHeader = () => "Bearer " + document.querySelector("#token").value;
-const apiHeaders = () => (mode === "lan" ? { Authorization: authHeader() } : {});
+const apiHeaders = () => (mode === "lan" ? { Authorization: "Bearer " + accessToken } : {});
+
+async function fetchApi(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { ...apiHeaders(), ...(options.headers || {}) }
+  });
+  if (mode === "lan" && response.status === 401) {
+    accessToken = "";
+    sessionStorage.removeItem(tokenStorageKey);
+    setAuthenticated(false);
+    loginError.textContent = "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
+  }
+  return response;
+}
 
 async function refreshStatus() {
   const text = document.querySelector("#status-text");
   try {
-    const response = await fetch("/api/status", { headers: apiHeaders() });
+    const response = await fetchApi("/api/status");
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Không thể kiểm tra trạng thái.");
-    text.textContent = "MCP: đang chạy | Civil 3D: " +
-      (data.civil3d_connected ? "đã kết nối" : "chưa kết nối");
-    text.className = data.civil3d_connected ? "" : "hint";
-    document.querySelector("#status-dir").textContent = "Thư mục công cụ tùy chỉnh: " + data.tools_directory;
-    document.querySelector("#status-tools").textContent =
-      "Tool đã đăng ký: " + (data.static_tool_count ?? "?") +
-      " tĩnh | " + (data.generated_api_tool_count ?? "?") + " API | " +
-      (data.custom_tool_module_count ?? "?") + " module tùy chỉnh" +
-      " | Tệp tùy chỉnh: " + (data.custom_tools.join(", ") || "chưa có");
+    renderStatus(data);
   } catch (error) {
     text.textContent = "Không kiểm tra được kết nối MCP: " +
       (error.message || "lỗi kết nối chưa xác định.");
@@ -240,7 +363,7 @@ async function refreshStatus() {
 }
 document.querySelector("#link-claude").addEventListener("click", async () => {
   try {
-    const response = await fetch("/api/claude/link", { method: "POST", headers: apiHeaders() });
+    const response = await fetchApi("/api/claude/link", { method: "POST" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Không thể cập nhật cấu hình Claude Desktop.");
     result.textContent = "Đã cập nhật cấu hình Claude Desktop. Hãy khởi động lại Claude Desktop để áp dụng.";
@@ -250,8 +373,10 @@ document.querySelector("#link-claude").addEventListener("click", async () => {
     result.className = "error";
   }
 });
-refreshStatus();
-setInterval(refreshStatus, 5000);
+if (mode !== "lan" || accessToken) refreshStatus();
+setInterval(() => {
+  if (mode !== "lan" || accessToken) refreshStatus();
+}, 5000);
 
 function addParameter() {
   if (parameterList.children.length >= 20) {
@@ -287,10 +412,11 @@ form.addEventListener("submit", async (event) => {
       required: row.querySelector(".param-required").checked
     }))
   };
-  const headers = { "Content-Type": "application/json", ...apiHeaders() };
   try {
-    const response = await fetch("/api/tools", {
-      method: "POST", headers, body: JSON.stringify(payload)
+    const response = await fetchApi("/api/tools", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Không tạo được công cụ. Hãy kiểm tra thông tin đã nhập.");
@@ -445,12 +571,14 @@ class ToolBuilderHTTPServer(http.server.ThreadingHTTPServer):
         tools_directory: Path,
         status_provider: Callable[[], dict[str, Any]] | None = None,
         claude_linker: Callable[[], list[Path]] | None = None,
+        tool_execution_controller: Callable[[bool], bool] | None = None,
     ) -> None:
         self.mode = mode
         self.access_token = access_token
         self.tools_directory = tools_directory
         self.status_provider = status_provider
         self.claude_linker = claude_linker
+        self.tool_execution_controller = tool_execution_controller
         super().__init__(server_address, handler_class)
 
 
@@ -492,7 +620,12 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
         if self.path not in {"/", "/index.html"}:
             self._send_json(404, {"error": "Not found."})
             return
-        page = _PAGE.replace("__MODE__", self.server.mode).encode("utf-8")
+        page = (
+            _PAGE.replace("__MODE__", self.server.mode)
+            .replace("__LOGIN_HIDDEN__", "" if self.server.mode == "lan" else " hidden")
+            .replace("__APP_HIDDEN__", " hidden" if self.server.mode == "lan" else "")
+            .encode("utf-8")
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -507,7 +640,7 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/tools", "/api/claude/link"}:
+        if self.path not in {"/api/tools", "/api/claude/link", "/api/server/control"}:
             self._send_json(404, {"error": "Not found."})
             return
 
@@ -517,6 +650,9 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/claude/link":
             self._link_claude()
+            return
+        if self.path == "/api/server/control":
+            self._control_server()
             return
 
         if self.headers.get_content_type() != "application/json":
@@ -570,6 +706,39 @@ class ToolBuilderRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         self._send_json(200, {"updated": [str(x) for x in updated]})
 
+    def _control_server(self) -> None:
+        controller = self.server.tool_execution_controller
+        if controller is None:
+            self._send_json(501, {"error": "MCP server control is unavailable."})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_json(415, {"error": "Content-Type must be application/json."})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+            if content_length < 0 or content_length > MAX_REQUEST_BYTES:
+                self._send_json(413, {"error": "Request body is too large."})
+                return
+            payload = json.loads(self.rfile.read(content_length))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._send_json(400, {"error": f"Invalid request body: {exc}"})
+            return
+        if not isinstance(payload, dict) or set(payload) != {"enabled"} or not isinstance(
+            payload["enabled"], bool
+        ):
+            self._send_json(400, {"error": "Expected a JSON object with boolean 'enabled'."})
+            return
+        try:
+            enabled = controller(payload["enabled"])
+            status: dict[str, Any] = {"tool_execution_enabled": enabled}
+            if self.server.status_provider is not None:
+                status.update(self.server.status_provider())
+        except Exception:
+            log.exception("MCP server control failed")
+            self._send_json(500, {"error": "Could not change MCP tool execution state."})
+            return
+        self._send_json(200, status)
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -590,6 +759,7 @@ def create_server(
     tools_directory: Path | None = None,
     status_provider: Callable[[], dict[str, Any]] | None = None,
     claude_linker: Callable[[], list[Path]] | None = None,
+    tool_execution_controller: Callable[[bool], bool] | None = None,
 ) -> tuple[ToolBuilderHTTPServer, str | None]:
     if mode not in {"localhost", "lan"}:
         raise ValueError("mode must be 'localhost' or 'lan'.")
@@ -605,6 +775,7 @@ def create_server(
         tools_directory=tools_directory if tools_directory is not None else user_tools_dir(),
         status_provider=status_provider,
         claude_linker=claude_linker,
+        tool_execution_controller=tool_execution_controller,
     )
     return server, token
 

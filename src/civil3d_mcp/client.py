@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -56,9 +57,7 @@ except ImportError:
 # Required DLL — always present in Civil 3D installations
 _CIVIL3D_DLL_NAMES = [
     "AeccDbMgd.dll",
-    "AeccMgd.dll",
     "AeccPressurePipesMgd.dll",
-    "AeccPipeNetworkMgd.dll",
 ]
 # Optional DLL — present in Civil 3D 2023/2024 but removed in 2025+
 _CIVIL3D_DLL_NAMES_OPTIONAL = ["AeccLandMgd.dll"]
@@ -99,6 +98,22 @@ def _find_dll(name: str) -> str | None:
 # Civil3DClient
 # ---------------------------------------------------------------------------
 
+class _CivilDocuments:
+    """Resolve attributes across the Land, Roadway, Pipe and Survey documents."""
+
+    def __init__(self, primary: Any, extras: list[Any]) -> None:
+        self._docs = [primary, *extras]
+
+    def __getattr__(self, name: str) -> Any:
+        error: Exception | None = None
+        for doc in self._docs:
+            try:
+                return getattr(doc, name)
+            except Exception as exc:
+                error = error or exc
+        raise AttributeError(name) from error
+
+
 class Civil3DError(RuntimeError):
     """Raised for any Civil 3D COM / API error."""
 
@@ -136,6 +151,12 @@ class Civil3DClient:
         "AeccXUiLand.AeccApplication.13.0",  # Civil 3D 2023
     ]
 
+    _CIVIL3D_EXTRA_PROG_IDS = [
+        "AeccXUiRoadway.AeccRoadwayApplication.13.8",
+        "AeccXUiPipe.AeccPipeApplication.13.8",
+        "AeccXUiSurvey.AeccSurveyApplication.13.8",
+    ]
+
     def connect(self) -> None:
         """Attach to the running Civil 3D / AutoCAD instance via COM.
 
@@ -165,13 +186,18 @@ class Civil3DClient:
 
         # Step 1 — connect to AutoCAD base application.
         try:
-            self._acad = w32.GetActiveObject("AutoCAD.Application")
+            self._acad = self._find_visible_acad() or w32.GetActiveObject("AutoCAD.Application")
             log.info("AutoCAD.Application connected – drawing: %s",
                      self._acad.ActiveDocument.Name)
         except Exception as exc:
+            hresult = getattr(exc, "hresult", None)
+            detail = f"{exc}"
+            if hresult is not None:
+                detail = f"{detail} (HRESULT 0x{hresult & 0xFFFFFFFF:08X})"
             raise Civil3DError(
                 "Could not connect to AutoCAD/Civil 3D. "
-                "Make sure Civil 3D is open with a drawing loaded."
+                "Make sure Civil 3D is open with a drawing loaded. "
+                f"Underlying COM error: {detail}"
             ) from exc
 
         # Step 2 — promote to Civil 3D via GetInterfaceObject.
@@ -190,6 +216,16 @@ class Civil3DClient:
             except Exception:
                 continue
 
+        # Corridors live on the Roadway application and pipe networks on the
+        # Pipe application; the Land document does not expose them.
+        self._civil_extra = []
+        if self._civil is not None:
+            for prog_id in self._CIVIL3D_EXTRA_PROG_IDS:
+                try:
+                    self._civil_extra.append(self._acad.GetInterfaceObject(prog_id))
+                except Exception as exc:
+                    log.debug("Optional Civil 3D interface %s unavailable: %s", prog_id, exc)
+
         if self._civil is None:
             # Fallback: plain AutoCAD document — Civil 3D collections unavailable.
             self._doc = self._acad.ActiveDocument
@@ -207,41 +243,59 @@ class Civil3DClient:
         self._connected = True
         log.info("Civil 3D client ready – drawing: %s", self._doc.Name)
 
+    @staticmethod
+    def _find_visible_acad() -> Any:
+        """Prefer the interactive AutoCAD/Civil 3D instance the user can see.
+
+        GetActiveObject returns whichever instance is first in the Running
+        Object Table, which may be a hidden background instance.
+        """
+        try:
+            rot = pythoncom.GetRunningObjectTable()
+            ctx = pythoncom.CreateBindCtx(0)
+            for moniker in rot.EnumRunning():
+                try:
+                    if not moniker.GetDisplayName(ctx, None).startswith("!AutoCAD.Application"):
+                        continue
+                    app = w32.Dispatch(rot.GetObject(moniker).QueryInterface(pythoncom.IID_IDispatch))
+                    if app.Visible and app.Documents.Count > 0:
+                        return app
+                except Exception:
+                    continue
+        except Exception as exc:
+            log.debug("Running Object Table scan failed: %s", exc)
+        return None
+
     def _load_managed_assemblies(self) -> None:
-        """Load Autodesk .NET DLLs via pythonnet for Civil 3D managed types."""
+        """Optionally load Autodesk .NET DLLs via pythonnet.
+
+        No tool depends on managed types: every operation goes through COM.
+        Civil 3D 2025+ runs on .NET 8 while pythonnet here hosts the .NET
+        Framework runtime, so loading fails with BadImageFormatException.
+        The bridge is therefore opt-in (CIVIL3D_LOAD_MANAGED=1) and failures
+        are logged once at debug level instead of as warnings per DLL.
+        """
+        if os.getenv("CIVIL3D_LOAD_MANAGED", "").strip().lower() not in ("1", "true", "yes"):
+            log.debug("Managed assembly loading disabled; using COM only.")
+            return
         if not _CLR:
-            log.warning(
-                "pythonnet not available – Civil 3D managed types "
-                "(surfaces, alignments) will use COM IDispatch only."
-            )
+            log.warning("pythonnet not available; using COM only.")
             return
 
-        for dll in _ACAD_DLL_NAMES + _CIVIL3D_DLL_NAMES:
+        for dll in _ACAD_DLL_NAMES + _CIVIL3D_DLL_NAMES + _CIVIL3D_DLL_NAMES_OPTIONAL:
             path = _find_dll(dll)
-            if path:
-                try:
-                    clr.AddReference(path)
-                    log.debug("Loaded assembly: %s", path)
-                except Exception as exc:
-                    log.warning("Could not load %s: %s", dll, exc)
-            else:
+            if not path:
+                log.debug("Assembly not present (skipping): %s", dll)
+                continue
+            try:
+                clr.AddReference(path)
+                log.debug("Loaded assembly: %s", path)
+            except Exception as exc:
                 log.warning(
-                    "Assembly not found: %s. "
-                    "Set CIVIL3D_BIN_PATH to the folder containing this DLL.",
-                    dll,
+                    "Managed bridge unavailable (%s: %s); continuing with COM only.",
+                    type(exc).__name__, str(exc).splitlines()[0] if str(exc) else "",
                 )
-        # Optional DLLs — load if present, skip silently if not (removed in Civil 3D 2025+)
-        for dll in _CIVIL3D_DLL_NAMES_OPTIONAL:
-            path = _find_dll(dll)
-            if path:
-                try:
-                    clr.AddReference(path)
-                    log.debug("Loaded optional assembly: %s", path)
-                except Exception as exc:
-                    log.warning("Could not load optional %s: %s", dll, exc)
-            else:
-                log.debug("Optional assembly not present (skipping): %s", dll)
-
+                return
     def disconnect(self) -> None:
         self._acad = None
         self._civil = None
@@ -251,17 +305,72 @@ class Civil3DClient:
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._acad is None:
-            raise Civil3DError(
-                "Not connected to Civil 3D. "
-                "Restart the MCP server with Civil 3D open."
-            )
+            # The server may have started before Civil 3D; retry once per call.
+            try:
+                self.connect()
+            except Civil3DError as exc:
+                raise Civil3DError(
+                    "Not connected to Civil 3D. Open Civil 3D with a drawing "
+                    f"loaded and retry. Detail: {exc}"
+                ) from exc
+            return
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                # Refresh active document from Civil 3D layer if available, else AutoCAD
+                source = self._civil if self._civil is not None else self._acad
+                self._doc = source.ActiveDocument
+                return
+            except Exception as exc:
+                last_exc = exc
+                # RPC_E_CALL_REJECTED / SERVERCALL_RETRYLATER: AutoCAD is busy.
+                if getattr(exc, "hresult", None) in (-2147418111, -2147417846):
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                break
+        # COM reference is stale (e.g. Civil 3D restarted or drawing switched): rebind.
+        self._connected = False
         try:
-            # Refresh active document from Civil 3D layer if available, else AutoCAD
-            source = self._civil if self._civil is not None else self._acad
-            self._doc = source.ActiveDocument
-        except Exception as exc:
-            self._connected = False
-            raise Civil3DError(f"Lost connection to Civil 3D: {exc}") from exc
+            self.connect()
+        except Civil3DError as exc:
+            raise Civil3DError(
+                f"Lost connection to Civil 3D: {last_exc}; reconnect failed: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _wait_idle(acad_doc: Any, timeout: float = 5.0) -> None:
+        """Wait until AutoCAD has finished queued SendCommand work."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if int(acad_doc.GetVariable("CMDACTIVE")) == 0:
+                    return
+            except Exception:
+                return
+            time.sleep(0.1)
+
+    @staticmethod
+    def _ensure_layer(acad_doc: Any, layer: str) -> None:
+        """Create the layer when missing; assigning an unknown layer raises 'Key not found'."""
+        layers = acad_doc.Layers
+        try:
+            layers.Item(layer)
+        except Exception:
+            layers.Add(layer)
+
+    @staticmethod
+    def _entity_id(entity: Any) -> str:
+        try:
+            return str(entity.ObjectID)
+        except Exception:
+            return str(getattr(entity, "Handle", ""))
+
+    @staticmethod
+    def _discard(entity: Any) -> None:
+        try:
+            entity.Delete()
+        except Exception:
+            log.warning("Could not remove partially created entity.")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -331,7 +440,7 @@ class Civil3DClient:
         }
         for attr, label in collection_attrs.items():
             try:
-                col = getattr(self._doc, attr, None)
+                col = getattr(self._civil_doc(), attr, None)
                 if col is not None:
                     civil_counts[label] = int(col.Count)
             except Exception:
@@ -341,6 +450,50 @@ class Civil3DClient:
             "model_space_counts": model_counts,
             "civil3d_collections": civil_counts,
             "total_model_objects": sum(model_counts.values()),
+        }
+
+    def analyze_drawing(self) -> dict[str, Any]:
+        """Return a read-only model-space inventory grouped by layer and type."""
+        self._ensure_connected()
+        entities_by_type: dict[str, int] = {}
+        layers: dict[str, dict[str, Any]] = {}
+        try:
+            for entity in self._doc.ModelSpace:
+                object_name = str(entity.ObjectName)
+                layer_name = str(entity.Layer)
+                if not object_name:
+                    raise Civil3DError("A model-space entity has no object type.")
+
+                entities_by_type[object_name] = (
+                    entities_by_type.get(object_name, 0) + 1
+                )
+                layer_key = layer_name.casefold()
+                layer = layers.setdefault(
+                    layer_key,
+                    {"name": layer_name, "count": 0, "entities_by_type": {}},
+                )
+                layer["count"] += 1
+                layer_types = layer["entities_by_type"]
+                layer_types[object_name] = layer_types.get(object_name, 0) + 1
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            raise Civil3DError(f"analyze_drawing failed: {exc}") from exc
+
+        return {
+            "total_model_space_entities": sum(entities_by_type.values()),
+            "entities_by_type": dict(sorted(entities_by_type.items())),
+            "layers": [
+                {
+                    **layer,
+                    "entities_by_type": dict(
+                        sorted(layer["entities_by_type"].items())
+                    ),
+                }
+                for layer in sorted(
+                    layers.values(), key=lambda item: item["name"].casefold()
+                )
+            ],
         }
 
     def get_selected_objects_info(self, max_count: int = 10) -> list[dict[str, Any]]:
@@ -561,10 +714,18 @@ class Civil3DClient:
         if not isinstance(layer, str) or not layer.strip():
             raise Civil3DError("Layer name must be a non-empty string.")
 
+        solid = None
         try:
             acad_doc = self._acad.ActiveDocument
+            self._wait_idle(acad_doc)
+            self._ensure_layer(acad_doc, layer)
+            center = (
+                float(x) + float(length) / 2,
+                float(y) + float(width) / 2,
+                float(z) + float(height) / 2,
+            )
             solid = acad_doc.ModelSpace.AddBox(
-                self._pt3d(x, y, z), float(length), float(width), float(height)
+                self._pt3d(*center), float(length), float(width), float(height)
             )
             solid.Layer = layer
             solid.Update()
@@ -573,7 +734,7 @@ class Civil3DClient:
             except Exception:
                 pass
             return {
-                "object_id": str(solid.ObjectID),
+                "object_id": self._entity_id(solid),
                 "handle": str(solid.Handle),
                 "layer": str(solid.Layer),
                 "origin": {"x": float(x), "y": float(y), "z": float(z)},
@@ -585,15 +746,231 @@ class Civil3DClient:
         except Civil3DError:
             raise
         except Exception as exc:
+            if solid is not None:
+                self._discard(solid)
             raise Civil3DError(f"create_solid_box failed: {exc}") from exc
+
+    @staticmethod
+    def _matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
+        return [
+            [sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)]
+            for i in range(4)
+        ]
+
+    @staticmethod
+    def _axis_matrix(origin: tuple[float, float, float], d: tuple[float, float, float]) -> list[list[float]]:
+        """4x4 transform sending local +Z to direction d and local origin to origin."""
+        n = math.sqrt(sum(c * c for c in d))
+        if n < 1e-12:
+            raise Civil3DError("Direction must be a non-zero vector.")
+        dx, dy, dz = (c / n for c in d)
+        if dz > 1 - 1e-12:
+            r = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        elif dz < -1 + 1e-12:
+            r = [[1, 0, 0], [0, -1, 0], [0, 0, -1]]
+        else:
+            # Rodrigues rotation about axis (Z x d) by angle acos(dz)
+            vx, vy = -dy, dx
+            k = 1.0 / (1.0 + dz)
+            r = [
+                [1 - k * vy * vy, k * vx * vy, vy],
+                [k * vx * vy, 1 - k * vx * vx, -vx],
+                [-vy, vx, 1 - k * (vx * vx + vy * vy)],
+            ]
+        return [
+            [*r[0], origin[0]],
+            [*r[1], origin[1]],
+            [*r[2], origin[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+
+    _PRIMITIVE_KINDS = ("cylinder", "cone", "sphere", "torus", "extrude", "revolve")
+
+    def create_solid_primitive(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Create a curved or profile-based solid; retries while AutoCAD is busy."""
+        for attempt in range(4):
+            try:
+                return self._create_solid_primitive(*args, **kwargs)
+            except Civil3DError as exc:
+                busy = "-2147418111" in str(exc) or "-2147417846" in str(exc)
+                if not busy or attempt == 3:
+                    raise
+                time.sleep(1.0 + attempt)
+        raise Civil3DError("create_solid_primitive failed")
+
+    def _create_solid_primitive(
+        self,
+        kind: str,
+        x: float,
+        y: float,
+        z: float,
+        direction: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        radius: float = 0.0,
+        height: float = 0.0,
+        inner_radius: float = 0.0,
+        top_radius: float = 0.0,
+        tube_radius: float = 0.0,
+        points: list[list[float]] | None = None,
+        taper_angle_deg: float = 0.0,
+        sweep_angle_deg: float = 360.0,
+        layer: str = "0",
+    ) -> dict[str, Any]:
+        """Create a curved or profile-based solid anchored at (x, y, z).
+
+        The local axis is +Z and the base sits at the anchor point; ``direction``
+        tilts the axis. Kinds:
+        - cylinder: radius, height, optional inner_radius (hollow tube/washer).
+        - cone: radius (base), height, optional top_radius (frustum).
+        - sphere: radius, centred on the anchor.
+        - torus: radius (ring centre line), tube_radius, centred on the anchor, ring in local XY.
+        - extrude: points = [[x, y], ...] closed polygon in local XY, height, taper_angle_deg.
+        - revolve: points = [[r, h], ...] profile (r >= 0 radius, h along the axis),
+          swept sweep_angle_deg around the local axis.
+        """
+        self._ensure_connected()
+        if kind not in self._PRIMITIVE_KINDS:
+            raise Civil3DError(f"kind must be one of {self._PRIMITIVE_KINDS}.")
+        nums = [x, y, z, radius, height, inner_radius, top_radius, tube_radius,
+                taper_angle_deg, sweep_angle_deg, *direction]
+        if not all(math.isfinite(float(v)) for v in nums):
+            raise Civil3DError("Coordinates and dimensions must be finite numbers.")
+        if not isinstance(layer, str) or not layer.strip():
+            raise Civil3DError("Layer name must be a non-empty string.")
+        if kind in ("cylinder", "cone", "extrude") and height <= 0:
+            raise Civil3DError("height must be greater than zero.")
+        if kind in ("cylinder", "cone", "sphere", "torus") and radius <= 0:
+            raise Civil3DError("radius must be greater than zero.")
+        if kind == "cylinder" and not 0 <= inner_radius < radius:
+            raise Civil3DError("inner_radius must be in [0, radius).")
+        if kind == "cone" and not 0 <= top_radius < radius:
+            raise Civil3DError("top_radius must be in [0, radius).")
+        if kind == "torus" and not 0 < tube_radius < radius:
+            raise Civil3DError("tube_radius must be in (0, radius).")
+        if kind in ("extrude", "revolve"):
+            if not points or len(points) < 3 or any(len(p) != 2 for p in points):
+                raise Civil3DError("points must contain at least three [a, b] pairs.")
+            if kind == "revolve" and (
+                any(float(p[0]) < 0 for p in points) or not 0 < sweep_angle_deg <= 360
+            ):
+                raise Civil3DError("Revolve needs radii >= 0 and sweep angle in (0, 360].")
+
+        created: list[Any] = []
+        curves: list[Any] = []
+
+        def region_from(curve: Any) -> Any:
+            curves.append(curve)
+            arr = w32.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [curve])
+            return self._acad.ActiveDocument.ModelSpace.AddRegion(arr)[0]
+
+        def polygon(pts: list[list[float]]) -> Any:
+            flat = [float(c) for p in pts for c in p]
+            poly = self._acad.ActiveDocument.ModelSpace.AddLightWeightPolyline(
+                w32.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, flat)
+            )
+            poly.Closed = True
+            return poly
+
+        solid = None
+        try:
+            acad_doc = self._acad.ActiveDocument
+            self._wait_idle(acad_doc)
+            self._ensure_layer(acad_doc, layer)
+            ms = acad_doc.ModelSpace
+            origin = self._pt3d(0.0, 0.0, 0.0)
+            local = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0], [0, 0, 0, 1.0]]
+
+            if kind == "cylinder":
+                solid = ms.AddCylinder(self._pt3d(0, 0, height / 2), radius, height)
+                created.append(solid)
+                if inner_radius > 0:
+                    bore = ms.AddCylinder(self._pt3d(0, 0, height / 2), inner_radius, height)
+                    created.append(bore)
+                    solid.Boolean(2, bore)
+                    created.remove(bore)
+            elif kind == "cone" and top_radius == 0:
+                solid = ms.AddCone(self._pt3d(0, 0, height / 2), radius, height)
+                created.append(solid)
+            elif kind == "cone":
+                # A frustum is a revolved trapezoid.
+                profile = [[0, 0], [radius, 0], [top_radius, height], [0, height]]
+                region = region_from(polygon(profile))
+                created.append(region)
+                solid = ms.AddRevolvedSolid(region, origin, self._pt3d(0, 1, 0), 2 * math.pi)
+                created.append(solid)
+                local = [[1.0, 0, 0, 0], [0, 0, -1.0, 0], [0, 1.0, 0, 0], [0, 0, 0, 1.0]]
+            elif kind == "sphere":
+                solid = ms.AddSphere(origin, radius)
+                created.append(solid)
+            elif kind == "torus":
+                solid = ms.AddTorus(origin, radius, tube_radius)
+                created.append(solid)
+            elif kind == "extrude":
+                region = region_from(polygon(points))
+                created.append(region)
+                solid = ms.AddExtrudedSolid(region, height, math.radians(taper_angle_deg))
+                created.append(solid)
+            else:  # revolve
+                region = region_from(polygon(points))
+                created.append(region)
+                solid = ms.AddRevolvedSolid(
+                    region, origin, self._pt3d(0, 1, 0), math.radians(sweep_angle_deg)
+                )
+                created.append(solid)
+                local = [[1.0, 0, 0, 0], [0, 0, -1.0, 0], [0, 1.0, 0, 0], [0, 0, 0, 1.0]]
+
+            for curve in curves:
+                self._discard(curve)
+            curves.clear()
+            for ent in created:
+                if ent is not solid:
+                    self._discard(ent)
+            try:
+                solid.Handle
+            except Exception:
+                # Some Add* calls return an untyped dispatch; re-fetch the new entity.
+                solid = ms.Item(ms.Count - 1)
+            created[:] = [solid]
+
+            matrix = self._matmul(
+                self._axis_matrix((float(x), float(y), float(z)), tuple(float(c) for c in direction)),
+                local,
+            )
+            solid.TransformBy(w32.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, matrix))
+            solid.Layer = layer
+            solid.Update()
+            try:
+                acad_doc.Regen(1)
+            except Exception:
+                pass
+            try:
+                volume = float(solid.Volume)
+            except Exception:
+                volume = None
+            return {
+                "object_id": self._entity_id(solid),
+                "handle": str(solid.Handle),
+                "layer": str(solid.Layer),
+                "kind": kind,
+                "anchor": {"x": float(x), "y": float(y), "z": float(z)},
+                "direction": [float(c) for c in direction],
+                "volume": volume,
+            }
+        except Civil3DError:
+            raise
+        except Exception as exc:
+            for ent in [*curves, *created]:
+                self._discard(ent)
+            raise Civil3DError(f"create_solid_primitive failed: {exc}") from exc
 
     def create_checkpoint(self) -> dict[str, Any]:
         """Mark the current drawing's undo history for a later restore."""
         self._ensure_connected()
         try:
             acad_doc = self._acad.ActiveDocument
+            self._wait_idle(acad_doc)
             document_name = str(acad_doc.FullName or acad_doc.Name)
             acad_doc.SendCommand("_.UNDO _MARK\n")
+            self._wait_idle(acad_doc)
             checkpoint_id = uuid.uuid4().hex
             self._checkpoint_id = checkpoint_id
             self._checkpoint_document = document_name
@@ -641,12 +1018,20 @@ class Civil3DClient:
     ) -> dict[str, Any]:
         """Create a 3-D line in model space."""
         self._ensure_connected()
+        line = None
         try:
             # Use the base AutoCAD document for geometry creation — the Civil 3D
             # AeccDocument wrapper does not reliably forward AddLine/Add3DPoly.
             acad_doc = self._acad.ActiveDocument
+            self._wait_idle(acad_doc)
+            self._ensure_layer(acad_doc, layer)
             mspace = acad_doc.ModelSpace
             line = mspace.AddLine(self._pt3d(x1, y1, z1), self._pt3d(x2, y2, z2))
+            try:
+                line.Handle
+            except Exception:
+                # Untyped dispatch returned by AddLine; re-fetch the new entity.
+                line = mspace.Item(mspace.Count - 1)
             line.Layer = layer
             line.Update()
             try:
@@ -654,7 +1039,7 @@ class Civil3DClient:
             except Exception:
                 pass
             return {
-                "object_id": str(line.ObjectID),
+                "object_id": self._entity_id(line),
                 "handle": str(line.Handle),
                 "layer": str(line.Layer),
                 "start": {"x": x1, "y": y1, "z": z1},
@@ -664,6 +1049,8 @@ class Civil3DClient:
         except Civil3DError:
             raise
         except Exception as exc:
+            if line is not None:
+                self._discard(line)
             raise Civil3DError(f"create_line failed: {exc}") from exc
 
     def create_polyline(
@@ -676,6 +1063,7 @@ class Civil3DClient:
         self._ensure_connected()
         if len(vertices) < 2:
             raise Civil3DError("At least 2 vertices are required.")
+        pline = None
         try:
             flat = [c for v in vertices for c in v]
             pt_array = w32.VARIANT(
@@ -684,8 +1072,15 @@ class Civil3DClient:
             # Use the base AutoCAD document for geometry creation — the Civil 3D
             # AeccDocument wrapper does not reliably forward Add3DPoly.
             acad_doc = self._acad.ActiveDocument
+            self._wait_idle(acad_doc)
+            self._ensure_layer(acad_doc, layer)
             mspace = acad_doc.ModelSpace
             pline = mspace.Add3DPoly(pt_array)
+            try:
+                pline.Handle
+            except Exception:
+                # Untyped dispatch returned by Add3DPoly; re-fetch the new entity.
+                pline = mspace.Item(mspace.Count - 1)
             pline.Layer = layer
             if closed:
                 pline.Closed = True
@@ -695,7 +1090,7 @@ class Civil3DClient:
             except Exception:
                 pass
             return {
-                "object_id": str(pline.ObjectID),
+                "object_id": self._entity_id(pline),
                 "handle": str(pline.Handle),
                 "layer": str(pline.Layer),
                 "vertex_count": len(vertices),
@@ -705,6 +1100,8 @@ class Civil3DClient:
         except Civil3DError:
             raise
         except Exception as exc:
+            if pline is not None:
+                self._discard(pline)
             raise Civil3DError(f"create_polyline failed: {exc}") from exc
 
     def list_lines(self, layer_filter: str = "") -> list[dict[str, Any]]:
@@ -790,9 +1187,16 @@ class Civil3DClient:
         """
         if self._civil is not None:
             try:
-                return self._civil.ActiveDocument
+                land = self._civil.ActiveDocument
             except Exception:
-                pass
+                return self._doc
+            extras = []
+            for app in getattr(self, "_civil_extra", []):
+                try:
+                    extras.append(app.ActiveDocument)
+                except Exception:
+                    continue
+            return _CivilDocuments(land, extras) if extras else land
         return self._doc
 
     def _get_surfaces(self) -> list[Any]:
@@ -805,15 +1209,21 @@ class Civil3DClient:
         if civil_doc is not self._doc:
             docs_to_try.append(civil_doc)
 
+        collection_available = False
         for doc in docs_to_try:
-            col = getattr(doc, "Surfaces", None)
+            try:
+                col = getattr(doc, "Surfaces", None)
+            except Exception as exc:
+                log.debug("_get_surfaces: Surfaces lookup failed on %r: %s", doc, exc)
+                continue
             if col is None:
                 continue
-            count = 0
             try:
                 count = int(col.Count)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("_get_surfaces: Surfaces.Count failed on %r: %s", doc, exc)
+                continue
+            collection_available = True
             log.debug("_get_surfaces: Surfaces.Count=%d from doc %r", count, doc)
             if count == 0:
                 continue
@@ -848,12 +1258,12 @@ class Civil3DClient:
         except Exception as exc:
             log.warning("Surface model-space scan failed: %s", exc)
 
-        if not results:
-            raise Civil3DError(
-                "Surfaces collection not found. "
-                "Ensure Civil 3D (not plain AutoCAD) is running."
-            )
-        return results
+        if results or collection_available:
+            return results
+        raise Civil3DError(
+            "Surfaces collection not found. "
+            "Ensure Civil 3D (not plain AutoCAD) is running."
+        )
 
     def list_surfaces(self) -> list[dict[str, Any]]:
         """List all TIN/Grid surfaces with basic elevation statistics."""
@@ -1023,13 +1433,20 @@ class Civil3DClient:
             surfaces = doc.Surfaces
             point_groups = doc.PointGroups
             surface_style = doc.SurfaceStyles.Item(0).Name
-            profile_style = doc.ProfileStyles.Item(0).Name
             layer = doc.Layers.Item(0).Name
         except Exception as exc:
             raise Civil3DError(
-                f"Required Civil 3D surface, point-group, style, or layer collection "
-                f"is unavailable: {exc}"
+                f"Required Civil 3D surface, point-group, surface-style, or layer "
+                f"collection is unavailable: {exc}"
             ) from exc
+
+        # Profile styles are only needed for profiles; an empty collection must
+        # not block surface creation.
+        profile_style: str | None = None
+        try:
+            profile_style = doc.ProfileStyles.Item(0).Name
+        except Exception as exc:
+            log.warning("No profile style available; profiles will be skipped: %s", exc)
 
         try:
             for existing in self._iter_com_collection(surfaces):
@@ -1083,7 +1500,8 @@ class Civil3DClient:
         group_name = f"{surface_name}_EG_{uuid.uuid4().hex[:8]}"
         tin_data = None
         attempted_versions = [
-            prog_id.rsplit(".", 1)[-1] for prog_id in self._CIVIL3D_PROG_IDS
+            prog_id.split("AeccApplication.", 1)[-1]
+            for prog_id in self._CIVIL3D_PROG_IDS
         ]
         for version in attempted_versions:
             try:
@@ -1143,6 +1561,12 @@ class Civil3DClient:
         profile_errors: list[dict[str, str]] = []
         for alignment, profiles in profile_targets:
             alignment_name = str(alignment.Name)
+            if profile_style is None:
+                profile_errors.append({
+                    "alignment_name": alignment_name,
+                    "error": "Drawing has no profile styles; profile skipped.",
+                })
+                continue
             try:
                 existing_names = {
                     str(getattr(item, "Name", "")).casefold()
@@ -1261,6 +1685,7 @@ class Civil3DClient:
     def _get_alignments(self) -> list[Any]:
         """Collect all alignments from siteless and site-based collections."""
         results: list[Any] = []
+        collection_available = False
 
         # Try self._doc first (same source that list_object_types uses
         # successfully for AlignmentsSiteless.Count), then _civil_doc().
@@ -1273,6 +1698,13 @@ class Civil3DClient:
             # Siteless alignments (Civil 3D 2016+)
             siteless = getattr(doc, "AlignmentsSiteless", None)
             if siteless is not None:
+                try:
+                    int(siteless.Count)
+                    collection_available = True
+                except Exception as exc:
+                    log.debug(
+                        "_get_alignments: AlignmentsSiteless.Count failed: %s", exc
+                    )
                 found = self._iter_com_collection(siteless)
                 log.debug(
                     "_get_alignments: AlignmentsSiteless from doc %r -> %d items",
@@ -1283,9 +1715,22 @@ class Civil3DClient:
             # Site-based alignments
             sites = getattr(doc, "Sites", None)
             if sites is not None:
+                try:
+                    int(sites.Count)
+                    collection_available = True
+                except Exception as exc:
+                    log.debug("_get_alignments: Sites.Count failed: %s", exc)
                 for site in self._iter_com_collection(sites):
                     al_col = getattr(site, "Alignments", None)
                     if al_col is not None:
+                        try:
+                            int(al_col.Count)
+                            collection_available = True
+                        except Exception as exc:
+                            log.debug(
+                                "_get_alignments: site Alignments.Count failed: %s",
+                                exc,
+                            )
                         results.extend(self._iter_com_collection(al_col))
 
             if results:
@@ -1310,12 +1755,12 @@ class Civil3DClient:
             except Exception as exc:
                 log.warning("Alignment model-space scan failed: %s", exc)
 
-        if not results:
-            raise Civil3DError(
-                "Alignments collection not found. "
-                "Ensure Civil 3D (not plain AutoCAD) is running."
-            )
-        return results
+        if results or collection_available:
+            return results
+        raise Civil3DError(
+            "Alignments collection not found. "
+            "Ensure Civil 3D (not plain AutoCAD) is running."
+        )
 
     def _find_alignment(self, name: str) -> Any:
         for al in self._get_alignments():

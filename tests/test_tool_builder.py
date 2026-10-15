@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,8 @@ from civil3d_mcp.tool_builder import (
 )
 
 from civil3d_mcp.custom_tools import register_custom_tools
+from civil3d_mcp import server as mcp_server
+from civil3d_mcp.client import Civil3DError
 
 
 def tool_spec() -> dict[str, object]:
@@ -136,6 +139,75 @@ class ToolBuilderTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_server_control_endpoint_updates_execution_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = {"enabled": True}
+
+            def controller(enabled: bool) -> bool:
+                state["enabled"] = enabled
+                return enabled
+
+            server, _ = create_server(
+                "localhost",
+                0,
+                Path(directory),
+                status_provider=lambda: {"tool_execution_enabled": state["enabled"]},
+                tool_execution_controller=controller,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/server/control",
+                    data=b'{"enabled":false}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request) as response:
+                    payload = json.loads(response.read())
+                self.assertFalse(payload["tool_execution_enabled"])
+                self.assertFalse(state["enabled"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_server_control_endpoint_requires_lan_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            server = ToolBuilderHTTPServer(
+                ("127.0.0.1", 0),
+                ToolBuilderRequestHandler,
+                mode="lan",
+                access_token="test-token",
+                tools_directory=Path(directory),
+                tool_execution_controller=lambda enabled: enabled,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/server/control",
+                    data=b'{"enabled":false}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request)
+                self.assertEqual(error.exception.code, 401)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_paused_server_rejects_tool_execution(self) -> None:
+        previous_state = mcp_server.tool_execution_enabled()
+        mcp_server.set_tool_execution_enabled(False)
+        try:
+            with self.assertRaisesRegex(Civil3DError, "paused"):
+                asyncio.run(mcp_server.run_com(lambda: "must not run"))
+        finally:
+            mcp_server.set_tool_execution_enabled(previous_state)
+
     def test_lan_mode_requires_token_before_saving(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             server = ToolBuilderHTTPServer(
@@ -149,6 +221,23 @@ class ToolBuilderTests(unittest.TestCase):
             thread.start()
             url = f"http://127.0.0.1:{server.server_address[1]}/api/tools"
             try:
+                page = urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read()
+                self.assertIn(b'id="login-form"', page)
+                self.assertIn(b'type="password"', page)
+                self.assertIn(b'id="app-content" hidden', page)
+
+                status_url = f"http://127.0.0.1:{server.server_address[1]}/api/status"
+                with self.assertRaises(HTTPError) as status_error:
+                    urlopen(status_url)
+                self.assertEqual(status_error.exception.code, 401)
+                with urlopen(
+                    Request(
+                        status_url,
+                        headers={"Authorization": "Bearer test-token"},
+                    )
+                ) as response:
+                    self.assertEqual(response.status, 200)
+
                 payload = json.dumps(tool_spec()).encode("utf-8")
                 request = Request(
                     url,

@@ -18,9 +18,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="list_surfaces",
         description=(
-            "List all TIN and Grid surfaces in the active Civil 3D drawing. "
-            "Returns name, description, style and elevation statistics "
-            "(min/max/mean) for each surface."
+            "List TIN/Grid surfaces with basic statistics."
         ),
     )
     async def list_surfaces() -> dict[str, Any]:
@@ -33,18 +31,10 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="get_surface_info",
         description=(
-            "Return detailed statistics for a named Civil 3D surface: "
-            "elevation range, mean elevation, point count, triangle count, "
-            "2D and 3D area."
+            "Get detailed stats for one named surface."
         ),
     )
     async def get_surface_info(surface_name: str) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        surface_name : str
-            The exact name of the surface as shown in Civil 3D Toolspace.
-        """
         try:
             return await run_com(client.get_surface_info, surface_name)
         except Civil3DError as exc:
@@ -53,9 +43,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="sample_surface_elevation",
         description=(
-            "Sample the elevation of a named Civil 3D surface at a specific "
-            "(easting, northing) coordinate. Returns the interpolated elevation "
-            "at that point. Raises an error if the point lies outside the surface."
+            "Sample surface elevation at one easting/northing coordinate."
         ),
     )
     async def sample_surface_elevation(
@@ -63,16 +51,6 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         easting: float,
         northing: float,
     ) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        surface_name : str
-            Name of the surface to query.
-        easting : float
-            X / easting coordinate in drawing units.
-        northing : float
-            Y / northing coordinate in drawing units.
-        """
         try:
             return await run_com(
                 client.sample_surface_elevation,
@@ -84,18 +62,10 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="list_surface_definition",
         description=(
-            "List all definition items (boundaries, breaklines, contours, DEM files, "
-            "drawing objects, point files, point groups, survey points, survey figures) "
-            "that make up a named Civil 3D surface."
+            "List definition items (boundaries, breaklines, files, points) for a surface."
         ),
     )
     async def list_surface_definition(surface_name: str) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        surface_name : str
-            The exact name of the surface as shown in Civil 3D Toolspace.
-        """
         try:
             return await run_com(client.list_surface_definition, surface_name)
         except Civil3DError as exc:
@@ -104,10 +74,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="tool_surface_mng",
         description=(
-            "Tạo TIN surface từ các điểm COGO có mô tả hoặc tên khớp chính xác "
-            "với mã điểm (mặc định EG), sau đó tạo profile lấy cao độ từ surface "
-            "cho tất cả alignment. Kết quả nêu rõ profile thành công/thất bại; "
-            "công cụ không tự tạo Profile View."
+            "Tạo TIN surface từ COGO point theo mã điểm, rồi tạo profile surface cho các alignment."
         ),
     )
     async def tool_surface_mng(
@@ -115,16 +82,6 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         profile_name: str = "EG_Profile",
         point_description: str = "EG",
     ) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        surface_name : str
-            Tên surface TIN mới.
-        profile_name : str
-            Tên profile lấy cao độ từ surface trên mỗi alignment.
-        point_description : str
-            Mô tả hoặc tên COGO point cần chọn; so khớp chính xác, không phân biệt hoa thường.
-        """
         try:
             return await run_com(
                 client.create_surface_from_eg_cogo_points,

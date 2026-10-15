@@ -18,9 +18,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="create_line",
         description=(
-            "Create a 3D line segment in the active Civil 3D drawing model space. "
-            "Provide start and end coordinates in (X/easting, Y/northing, Z/elevation). "
-            "Returns the object handle, layer and computed length."
+            "Create a 3D line in model space from start/end XYZ."
         ),
     )
     async def create_line(
@@ -32,16 +30,6 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         z2: float,
         layer: str = "0",
     ) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        x1, y1, z1 : float
-            Start point (easting, northing, elevation).
-        x2, y2, z2 : float
-            End point (easting, northing, elevation).
-        layer : str
-            Target layer name (default '0').
-        """
         try:
             return await run_com(
                 client.create_line,
@@ -53,9 +41,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="create_polyline",
         description=(
-            "Create a 3D polyline in the active Civil 3D drawing model space "
-            "from an ordered list of vertices. Each vertex is [x, y, z]. "
-            "Optionally close the polyline. Returns handle, vertex count and length."
+            "Create a 3D polyline from ordered vertices [x,y,z] (or [x,y])."
         ),
     )
     async def create_polyline(
@@ -63,17 +49,6 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
         closed: bool = False,
         layer: str = "0",
     ) -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        vertices : list of [x, y, z]
-            Ordered list of 3D vertices, e.g. [[100.0, 200.0, 10.5], ...].
-            Minimum 2 vertices required.
-        closed : bool
-            Whether to close the polyline back to the first vertex.
-        layer : str
-            Target layer name (default '0').
-        """
         if not vertices or len(vertices) < 2:
             return {"error": "At least 2 vertices are required."}
 
@@ -95,19 +70,10 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="list_lines",
         description=(
-            "List lines and polylines in the active Civil 3D drawing model space. "
-            "Optionally filter by layer name. Returns object type, handle, layer "
-            "and length for each entity found."
+            "List line/polyline entities, optionally filtered by layer."
         ),
     )
     async def list_lines(layer_filter: str = "") -> dict[str, Any]:
-        """
-        Parameters
-        ----------
-        layer_filter : str
-            If provided, only return lines on this layer (case-insensitive).
-            Leave empty to return all lines.
-        """
         try:
             lines = await run_com(client.list_lines, layer_filter)
             return {"lines": lines, "count": len(lines)}
@@ -117,8 +83,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="create_solid_box",
         description=(
-            "Create an axis-aligned 3D box solid in the active drawing's model space. "
-            "Provide its lower corner and positive length, width, and height."
+            "Create an axis-aligned 3D box solid from origin and dimensions."
         ),
     )
     async def create_solid_box(
@@ -139,11 +104,47 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
             return {"error": str(exc)}
 
     @mcp.tool(
+        name="create_solid_primitive",
+        description=(
+            "Create a detailed 3D solid: cylinder (optional inner_radius for tubes/washers), "
+            "cone (optional top_radius for frustum), sphere, torus, extrude (polygon points [[x,y],...] "
+            "+ height + taper), or revolve (profile points [[radius,height],...] swept around the axis). "
+            "Anchored at (x,y,z) at the base (sphere/torus: centre); 'direction' tilts the local Z axis. "
+            "Use revolve for insulator discs, shackles, nuts and other round parts."
+        ),
+    )
+    async def create_solid_primitive(
+        kind: str,
+        x: float,
+        y: float,
+        z: float,
+        direction: list[float] | None = None,
+        radius: float = 0.0,
+        height: float = 0.0,
+        inner_radius: float = 0.0,
+        top_radius: float = 0.0,
+        tube_radius: float = 0.0,
+        points: list[list[float]] | None = None,
+        taper_angle_deg: float = 0.0,
+        sweep_angle_deg: float = 360.0,
+        layer: str = "0",
+    ) -> dict[str, Any]:
+        try:
+            d = tuple(direction) if direction else (0.0, 0.0, 1.0)
+            if len(d) != 3:
+                return {"error": "direction must have three components."}
+            return await run_com(
+                client.create_solid_primitive, kind, x, y, z, d, radius, height,
+                inner_radius, top_radius, tube_radius, points, taper_angle_deg,
+                sweep_angle_deg, layer,
+            )
+        except Civil3DError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool(
         name="create_checkpoint",
         description=(
-            "Mark the current drawing's undo history. Returns a checkpoint ID that "
-            "can be used with restore_checkpoint; only the latest checkpoint in "
-            "this server session is restorable."
+            "Create an undo checkpoint for later restore in this server session."
         ),
     )
     async def create_checkpoint() -> dict[str, Any]:
@@ -156,9 +157,7 @@ def register(mcp: FastMCP, client: Civil3DClient, run_com: Callable) -> None:
     @mcp.tool(
         name="restore_checkpoint",
         description=(
-            "Undo changes in the drawing back to the latest checkpoint created "
-            "in this server session. Requires its checkpoint_id and the same "
-            "drawing to remain active."
+            "Undo drawing changes back to the latest checkpoint in this server session."
         ),
     )
     async def restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:

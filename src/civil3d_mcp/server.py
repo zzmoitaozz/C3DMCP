@@ -16,6 +16,7 @@ import functools
 import hmac
 import ipaddress
 import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -50,6 +51,18 @@ log = logging.getLogger("civil3d_mcp")
 # Shared Civil 3D client  (one COM connection for the server lifetime)
 # ---------------------------------------------------------------------------
 client = Civil3DClient()
+_tool_execution_enabled = True
+
+
+def set_tool_execution_enabled(enabled: bool) -> bool:
+    """Enable or pause execution of Civil 3D MCP tools."""
+    global _tool_execution_enabled
+    _tool_execution_enabled = enabled
+    return _tool_execution_enabled
+
+
+def tool_execution_enabled() -> bool:
+    return _tool_execution_enabled
 
 
 def _com_thread_init() -> None:
@@ -85,6 +98,8 @@ async def run_com(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     (-2147417842).  This helper ensures every client call is dispatched to the
     correct thread.
     """
+    if not _tool_execution_enabled:
+        raise Civil3DError("MCP tool execution is paused by remote control.")
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, functools.partial(fn, *args, **kwargs))
 
@@ -98,9 +113,12 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(_executor, client.connect)
+        total_tools = len(await mcp.list_tools())
         log.info(
-            "civil3d-mcp ready | %d static tools, %d generated API tools, "
-            "and %d custom tool modules",
+            "civil3d-mcp ready | toolset=%s, %d tools total, %d static baseline tools, "
+            "%d generated API tools, and %d custom tool modules",
+            selected_toolset,
+            total_tools,
             len(_builtin_tool_names()),
             generated_api_tool_count,
             custom_tool_modules,
@@ -156,12 +174,34 @@ class _EnvironmentBearerTokenVerifier(TokenVerifier):
 # ---------------------------------------------------------------------------
 # Register all tool groups  (pass run_com so tools dispatch via executor)
 # ---------------------------------------------------------------------------
-tools_drawing.register(mcp, client, run_com)
-tools_cogo.register(mcp, client, run_com)
-tools_lines.register(mcp, client, run_com)
-tools_surfaces.register(mcp, client, run_com)
-tools_alignments.register(mcp, client, run_com)
-tools_corridors.register(mcp, client, run_com)
+def _toolset_mode() -> str:
+    mode = os.environ.get("CIVIL3D_TOOLSET", "full").strip().lower()
+    if mode in {"", "full"}:
+        return "full"
+    if mode == "core":
+        return "core"
+    log.warning("Unknown CIVIL3D_TOOLSET=%r. Falling back to 'full'.", mode)
+    return "full"
+
+
+def _static_registrars_for(mode: str) -> list[Callable[[FastMCP, Civil3DClient, Callable], None]]:
+    core = [
+        tools_drawing.register,
+        tools_cogo.register,
+        tools_surfaces.register,
+    ]
+    if mode == "core":
+        return core
+    return core + [
+        tools_lines.register,
+        tools_alignments.register,
+        tools_corridors.register,
+    ]
+
+
+selected_toolset = _toolset_mode()
+for registrar in _static_registrars_for(selected_toolset):
+    registrar(mcp, client, run_com)
 generated_api_tool_count = tools_api.register(mcp, client, run_com)
 custom_tool_modules = register_custom_tools(mcp, client, run_com)
 

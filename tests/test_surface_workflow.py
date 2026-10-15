@@ -96,6 +96,9 @@ class SurfaceWorkflowTests(unittest.TestCase):
         self.assertEqual(result["matched_point_numbers"], [4, 7])
         self.assertEqual(group.QueryBuilder.IncludeNumbers, "4,7")
         groups.Add.assert_called_once()
+        client._acad.GetInterfaceObject.assert_called_once_with(
+            "AeccXLand.AeccTinCreationData.13.8"
+        )
         surfaces.AddTinSurface.assert_called_once_with(tin_data)
         surface.PointGroups.Add.assert_called_once_with(group)
         surface.Rebuild.assert_called_once_with()

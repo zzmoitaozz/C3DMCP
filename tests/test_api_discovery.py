@@ -89,18 +89,37 @@ class ToolTests(unittest.TestCase):
         return asyncio.run(go())
 
     def test_tool_count(self) -> None:
-        self.assertEqual(self.count, 1 + 4 * len(disc.CATEGORIES))
+        self.assertEqual(self.count, 5)
 
     def test_list_get_invoke(self) -> None:
-        self.assertEqual(self.call("c3d_surfaces_list", {})["objects"], ["EG", "FG"])
-        got = self.call("c3d_surfaces_get", {"name": "EG"})
+        self.assertEqual(self.call("c3d_list", {"category": "surfaces"})["objects"], ["EG", "FG"])
+        got = self.call("c3d_get", {"category": "surfaces", "name": "EG"})
         self.assertEqual(got["properties"], {"Area": 12.5, "Name": "EG"})
-        self.assertTrue(self.call("c3d_surfaces_invoke", {"name": "EG", "member": "Rebuild"})["result"])
-        self.assertIn("error", self.call("c3d_surfaces_invoke", {"name": "EG", "member": "Delete"}))
+        self.assertTrue(self.call("c3d_invoke", {"category": "surfaces", "name": "EG", "member": "Rebuild"})["result"])
+        self.assertIn("error", self.call("c3d_invoke", {"category": "surfaces", "name": "EG", "member": "Delete"}))
         self.assertTrue(
-            self.call("c3d_surfaces_invoke", {"name": "FG", "member": "Description", "set_value": "x"})["result"]
+            self.call("c3d_invoke", {"category": "surfaces", "name": "FG", "member": "Description", "set_value": "x"})["result"]
         )
 
     def test_categories(self) -> None:
         cats = self.call("c3d_api_categories", {})["categories"]
         self.assertEqual(next(c for c in cats if c["category"] == "surfaces")["methods"], 1)
+
+    def test_pagination_and_unknown_category(self) -> None:
+        got = self.call("c3d_list", {"category": "surfaces", "limit": 1})
+        self.assertEqual(got["objects"], ["EG"])
+        self.assertTrue(got["truncated"])
+        self.assertEqual(got["next_offset"], 1)
+        self.assertIn("error", self.call("c3d_list", {"category": "nope"}))
+
+    def test_legacy_tools_and_budget(self) -> None:
+        async def names(mcp):
+            return {t.name for t in await mcp.list_tools()}
+        legacy = FastMCP("l")
+        tools_api.register(legacy, FakeClient(), run_com, catalog(), legacy=True)
+        self.assertIn("c3d_surfaces_list", asyncio.run(names(legacy)))
+        self.assertNotIn("c3d_surfaces_list", asyncio.run(names(self.mcp)))
+        import json
+        async def size():
+            return sum(len(json.dumps({"d": t.description, "s": t.parameters})) for t in await self.mcp.list_tools())
+        self.assertLess(asyncio.run(size()), 3000)

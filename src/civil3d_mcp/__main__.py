@@ -18,6 +18,7 @@ def _serve(
     ssl_certfile: str | None,
     ssl_keyfile: str | None,
     allowed_hosts: list[str],
+    web_mode: str = "localhost",
 ) -> None:
     from civil3d_mcp import server
     from civil3d_mcp.integration import link_claude_desktop
@@ -27,6 +28,7 @@ def _serve(
     def status() -> dict:
         return {
             "civil3d_connected": bool(getattr(server.client, "_connected", False)),
+            "tool_execution_enabled": server.tool_execution_enabled(),
             "static_tool_count": len(_builtin_tool_names()),
             "generated_api_tool_count": server.generated_api_tool_count,
             "custom_tool_module_count": server.custom_tool_modules,
@@ -35,16 +37,23 @@ def _serve(
 
     if web_port >= 0:
         try:
-            web, _ = start_in_thread(
-                "localhost",
+            web, web_token = start_in_thread(
+                web_mode,
                 web_port,
                 tools_directory=user_tools_dir(),
                 status_provider=status,
                 claude_linker=link_claude_desktop,
+                tool_execution_controller=server.set_tool_execution_enabled,
             )
             logging.getLogger("civil3d_mcp").info(
-                "Tool Builder UI: http://localhost:%s", web.server_address[1]
+                "Tool Builder UI: http://%s:%s",
+                "localhost" if web_mode == "localhost" else "<computer-LAN-IP>",
+                web.server_address[1],
             )
+            if web_token:
+                logging.getLogger("civil3d_mcp").info(
+                    "Tool Builder LAN access token: %s", web_token
+                )
         except OSError as exc:
             logging.getLogger("civil3d_mcp").warning("Web UI disabled: %s", exc)
     server.main(
@@ -75,30 +84,41 @@ def _web(mode: str, port: int) -> None:
 
 
 def main() -> None:
+    default_web_port = int(os.environ.get("CIVIL3D_MCP_WEB_PORT", DEFAULT_PORT))
+    default_transport = os.environ.get("CIVIL3D_MCP_TRANSPORT", "stdio")
+    default_host = os.environ.get("CIVIL3D_MCP_HOST", "127.0.0.1")
+    default_http_port = int(os.environ.get("CIVIL3D_MCP_PORT", "8766"))
+
     parser = argparse.ArgumentParser(prog="civil3d-mcp")
     sub = parser.add_subparsers(dest="command")
     p_serve = sub.add_parser("serve", help="Run the MCP server over stdio (default).")
     p_serve.add_argument(
         "--web-port",
         type=int,
-        default=int(os.environ.get("CIVIL3D_MCP_WEB_PORT", DEFAULT_PORT)),
+        default=default_web_port,
         help="Web UI port (-1 disables it).",
+    )
+    p_serve.add_argument(
+        "--web-mode",
+        choices=("localhost", "lan"),
+        default="localhost",
+        help="Bind the Tool Builder to localhost (default) or the LAN.",
     )
     p_serve.add_argument(
         "--transport",
         choices=("stdio", "http"),
-        default=os.environ.get("CIVIL3D_MCP_TRANSPORT", "stdio"),
+        default=default_transport,
         help="MCP transport. Remote HTTP requires a bearer token and TLS off-loopback.",
     )
     p_serve.add_argument(
         "--host",
-        default=os.environ.get("CIVIL3D_MCP_HOST", "127.0.0.1"),
+        default=default_host,
         help="HTTP bind address; use a private network interface for remote clients.",
     )
     p_serve.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("CIVIL3D_MCP_PORT", "8766")),
+        default=default_http_port,
         help="HTTP transport port.",
     )
     p_serve.add_argument("--ssl-certfile", help="TLS certificate file for HTTP transport.")
@@ -119,13 +139,14 @@ def main() -> None:
     command = args.command or "serve"
     if command == "serve":
         _serve(
-            args.web_port,
-            args.transport,
-            args.host,
-            args.port,
-            args.ssl_certfile,
-            args.ssl_keyfile,
-            args.allowed_host,
+            getattr(args, "web_port", default_web_port),
+            getattr(args, "transport", default_transport),
+            getattr(args, "host", default_host),
+            getattr(args, "port", default_http_port),
+            getattr(args, "ssl_certfile", None),
+            getattr(args, "ssl_keyfile", None),
+            getattr(args, "allowed_host", []),
+            getattr(args, "web_mode", "localhost"),
         )
     elif command == "web":
         logging.basicConfig(level=logging.INFO)
