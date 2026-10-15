@@ -1,0 +1,44 @@
+name: Civil 3D MCP server control
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Start, stop, or inspect the MCP HTTP server on the Civil 3D workstation
+        required: true
+        type: choice
+        options:
+          - status
+          - start
+          - stop
+
+permissions:
+  contents: read
+
+jobs:
+  control-server:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, civil3d]
+    timeout-minutes: 3
+    env:
+      GITHUB_REF: ${{ github.ref }}
+      CIVIL3D_MCP_HTTP_TOKEN: ${{ secrets.CIVIL3D_MCP_HTTP_TOKEN }}
+      CIVIL3D_MCP_REPOSITORY: ${{ vars.CIVIL3D_MCP_REPOSITORY }}
+      CIVIL3D_MCP_PYTHON: ${{ vars.CIVIL3D_MCP_PYTHON }}
+      CIVIL3D_MCP_HOST: ${{ vars.CIVIL3D_MCP_HOST }}
+      CIVIL3D_MCP_PORT: ${{ vars.CIVIL3D_MCP_PORT }}
+      CIVIL3D_MCP_CERTFILE: ${{ vars.CIVIL3D_MCP_CERTFILE }}
+      CIVIL3D_MCP_KEYFILE: ${{ vars.CIVIL3D_MCP_KEYFILE }}
+      CIVIL3D_MCP_ALLOWED_HOST: ${{ vars.CIVIL3D_MCP_ALLOWED_HOST }}
+      CONTROL_ACTION: ${{ inputs.action }}
+    steps:
+      - name: Check out trusted main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Control server
+        shell: pwsh
+        run: |
+          & .\scripts\civil3d-server-control.ps1 -Action $env:CONTROL_ACTION
